@@ -1,0 +1,6 @@
+# folder_name/*
+# !folder_name/somefile
+
+data/*
+
+lmcache-local-disk-example/*
