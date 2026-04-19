@@ -35,14 +35,14 @@ JUDGE_PROMPT = """
     0 = contradicted or unsupported
 
     Return ONLY valid JSON with this schema:
-    {
+    {{
     "correct": 0 or 1,
     "score": integer 0-5,
     "reason": "short explanation",
     "faithful": 0 or 1,
     "faithfulness_score": integer 0-5,
     "faithfulness_reason": "short explanation"
-    }
+    }}
 
     Question:
     {question}

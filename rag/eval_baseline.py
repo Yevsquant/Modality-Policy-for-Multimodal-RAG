@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from statistics import mean
 
+from openai import OpenAI
+
 from rag.config import RAGConfig
 from rag.mmdocrag_dataset import load_examples
 from rag.metrics import aggregate_summary, build_evidence_text, lexical_metrics, llm_judge, retrieval_recall
