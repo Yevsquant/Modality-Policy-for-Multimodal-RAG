@@ -1,5 +1,5 @@
 from rag.config import RAGConfig
-from rag.eval_baseline import run_baseline
+from rag.eval_baseline import run_baseline, run_offline_judge
 import requests
 from typing import Dict, Optional
 import os
@@ -64,10 +64,11 @@ if __name__ == "__main__":
     metrics_after = scrape_prometheus_metrics()
     host_memory_stats_after = get_host_memory_stats()
     dir_size_after = get_dir_size_gb(path)
+    offline_results = run_offline_judge(cfg)
 
     final_results = {
-        "summary": baseline_results["summary"],
-        "rows": baseline_results["rows"],
+        "summary": offline_results["summary"],
+        "rows": offline_results["rows"],
         "system_utilization": {
             "metrics_before": metrics_before,
             "metrics_after": metrics_after,
@@ -79,7 +80,7 @@ if __name__ == "__main__":
         },
     }
 
-    output_path = cfg.output_dir / "baseline_results_with_utilization.json"
+    output_path = cfg.output_dir / "final_results_with_utilization.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as f:

@@ -80,6 +80,8 @@ class MMDocRAGPipeline:
             "pred_answer": pred,
             "gold_quotes": example["gold_quotes"],
             "retrieved_quote_ids": retrieved_ids,
+            "selected_text_quotes": retrieval["selected_text_quotes"],
+            "selected_img_quotes": retrieval["selected_img_quotes"],
             "timing": {
                 "retrieval_sec": t1 - t0,
                 "request_build_sec": t2 - t1,

@@ -20,5 +20,9 @@ class RAGConfig:
     vlm_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     temperature: float = 0.0
 
+    # offline judge
+    judge_api_base: str = "http://127.0.0.1:8000/v1"
+    judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+
     # eval
     max_examples: int = 50   # start small for baseline
