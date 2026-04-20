@@ -16,8 +16,13 @@ class RAGConfig:
     retrieval_device: str = "cuda"
 
     # pruning baselines
-    pruning_mode: str = "uniform_pruning" # {"no_pruning", "uniform_pruning", "visual_only_pruning"}
+    pruning_mode: str = "visual_patch_pruning"  # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "model_internal_visual_pruning"}
     pruning_keep_ratio: float = 0.5
+    patch_grid_rows: int = 4
+    patch_grid_cols: int = 4
+    min_visual_tokens: int = 4
+    montage_tile_size: int = 224
+    pruned_image_dir: Path = Path("data/mmdocrag/outputs/pruned_images")
 
     # generation
     vlm_api_base: str = "http://127.0.0.1:8000/v1"

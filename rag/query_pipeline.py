@@ -25,6 +25,13 @@ class MMDocRAGPipeline:
         self.pruner = RetrievalPruner(
             mode=cfg.pruning_mode,
             keep_ratio=cfg.pruning_keep_ratio,
+            image_model_name=cfg.image_embedding_model,
+            device=cfg.retrieval_device,
+            patch_grid_rows=cfg.patch_grid_rows,
+            patch_grid_cols=cfg.patch_grid_cols,
+            min_visual_tokens=cfg.min_visual_tokens,
+            montage_tile_size=cfg.montage_tile_size,
+            output_dir=cfg.pruned_image_dir,
         )
         self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
 
@@ -37,7 +44,7 @@ class MMDocRAGPipeline:
         )
         t1 = time.perf_counter()
 
-        pruned_retrieval = self.pruner.apply(retrieval) # retriever-level pruning
+        pruned_retrieval = self.pruner.apply(example, retrieval)
 
         prompt = build_prompt(example, pruned_retrieval)
 
@@ -80,6 +87,15 @@ class MMDocRAGPipeline:
 
         ttft = None if first_token_time is None else (first_token_time - t2)
 
+        visual_pruning_meta = [
+            {
+                "quote_id": q.get("quote_id"),
+                "visual_pruning": q.get("visual_pruning"),
+            }
+            for q in pruned_retrieval["selected_img_quotes"]
+            if q.get("visual_pruning") is not None
+        ]
+
         return {
             "q_id": example["q_id"],
             "question": example["question"],
@@ -90,6 +106,7 @@ class MMDocRAGPipeline:
             "selected_text_quotes": pruned_retrieval["selected_text_quotes"],
             "selected_img_quotes": pruned_retrieval["selected_img_quotes"],
             "pruning": pruned_retrieval["pruning"],
+            "visual_pruning": visual_pruning_meta,
             "timing": {
                 "retrieval_sec": t1 - t0,
                 "request_build_sec": t2 - t1,
