@@ -7,6 +7,7 @@ from openai import OpenAI
 
 from rag.config import RAGConfig
 from rag.prompt_builder import build_prompt
+from rag.pruner import RetrievalPruner
 from rag.retriever import QuoteRetriever
 
 def encode_image(path: str) -> str:
@@ -21,6 +22,10 @@ class MMDocRAGPipeline:
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
         )
+        self.pruner = RetrievalPruner(
+            mode=cfg.pruning_mode,
+            keep_ratio=cfg.pruning_keep_ratio,
+        )
         self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
 
     def run_one(self, example: Dict) -> Dict:
@@ -32,10 +37,12 @@ class MMDocRAGPipeline:
         )
         t1 = time.perf_counter()
 
-        prompt = build_prompt(example, retrieval)
+        pruned_retrieval = self.pruner.apply(retrieval) # retriever-level pruning
+
+        prompt = build_prompt(example, pruned_retrieval)
 
         content = [{"type": "text", "text": prompt}]
-        for q in retrieval["selected_img_quotes"]:
+        for q in pruned_retrieval["selected_img_quotes"]:
             path = q.get("local_img_path")
             if path and Path(path).exists():
                 content.append({
@@ -66,9 +73,9 @@ class MMDocRAGPipeline:
         pred = "".join(pieces)
 
         retrieved_ids = [
-            q["quote_id"] for q in retrieval["selected_text_quotes"]
+            q["quote_id"] for q in pruned_retrieval["selected_text_quotes"]
         ] + [
-            q["quote_id"] for q in retrieval["selected_img_quotes"]
+            q["quote_id"] for q in pruned_retrieval["selected_img_quotes"]
         ]
 
         ttft = None if first_token_time is None else (first_token_time - t2)
@@ -80,8 +87,9 @@ class MMDocRAGPipeline:
             "pred_answer": pred,
             "gold_quotes": example["gold_quotes"],
             "retrieved_quote_ids": retrieved_ids,
-            "selected_text_quotes": retrieval["selected_text_quotes"],
-            "selected_img_quotes": retrieval["selected_img_quotes"],
+            "selected_text_quotes": pruned_retrieval["selected_text_quotes"],
+            "selected_img_quotes": pruned_retrieval["selected_img_quotes"],
+            "pruning": pruned_retrieval["pruning"],
             "timing": {
                 "retrieval_sec": t1 - t0,
                 "request_build_sec": t2 - t1,

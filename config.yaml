@@ -1,9 +1,9 @@
 chunk_size: 256
 local_cpu: true
-max_local_cpu_size: 30.0
+max_local_cpu_size: 1.0
 local_disk: "file:///home/runying2/lmcache_storage/"
-max_local_disk_size: 100.0
-extra_config: {'use_odirect': True}
+max_local_disk_size: 20.0
+extra_config: {'use_odirect': False}
 cache_policy: "LRU"
 
 # chunk_size: 256

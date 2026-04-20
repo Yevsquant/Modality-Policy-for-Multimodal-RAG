@@ -15,6 +15,10 @@ class RAGConfig:
     image_embedding_model: str = "openai/clip-vit-base-patch32"
     retrieval_device: str = "cuda"
 
+    # pruning baselines
+    pruning_mode: str = "uniform_pruning" # {"no_pruning", "uniform_pruning", "visual_only_pruning"}
+    pruning_keep_ratio: float = 0.5
+
     # generation
     vlm_api_base: str = "http://127.0.0.1:8000/v1"
     vlm_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"

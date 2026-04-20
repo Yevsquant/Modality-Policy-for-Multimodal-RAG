@@ -41,9 +41,12 @@ def run_baseline(cfg: RAGConfig):
             f"Total={out['timing']['total_sec']:.2f}s"
         )
     valid_ttft = [r["timing"]["ttft_sec"] for r in rows if r["timing"]["ttft_sec"] is not None]
+    summary = aggregate_summary(rows)
+    summary["pruning_mode"] = cfg.pruning_mode
+    summary["pruning_keep_ratio"] = cfg.pruning_keep_ratio
 
     results = {
-        "summary": aggregate_summary(rows),
+        "summary": summary,
         "rows": rows,
     }
     
@@ -93,9 +96,11 @@ def run_offline_judge(cfg: RAGConfig, predictions_file: Path | None = None):
             f"Faithful={judge['faithful']} "
             f"F-Score={judge['faithfulness_score']}"
         )
-
+    summary = aggregate_summary(rows)
+    summary["pruning_mode"] = cfg.pruning_mode
+    summary["pruning_keep_ratio"] = cfg.pruning_keep_ratio
     results = {
-        "summary": aggregate_summary(rows),
+        "summary": summary,
         "rows": rows,
     }
 
