@@ -10,17 +10,6 @@ from rag.prompt_builder import build_prompt
 from rag.pruner import RetrievalPruner
 from rag.retriever import QuoteRetriever
 
-def _extract_mm_processor_kwargs(pruned_retrieval: Dict, cfg: RAGConfig) -> Dict:
-    mm_kwargs: Dict = {}
-    visual_pruning = pruned_retrieval.get("visual_pruning", {}) or {}
-    if isinstance(visual_pruning, dict):
-        keep_indices = visual_pruning.get("image_keep_indices")
-        if keep_indices:
-            mm_kwargs["image_keep_indices"] = keep_indices
-    if cfg.pruning_mode == "model_internal_visual_pruning":
-        mm_kwargs.setdefault("image_keep_ratio", cfg.pruning_keep_ratio)
-    return mm_kwargs
-
 def encode_image(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
@@ -33,35 +22,20 @@ class MMDocRAGPipeline:
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
         )
-        self.pruner = RetrievalPruner(
-            mode=cfg.pruning_mode,
-            keep_ratio=cfg.pruning_keep_ratio,
-            image_model_name=cfg.image_embedding_model,
-            device=cfg.retrieval_device,
-            patch_grid_rows=cfg.patch_grid_rows,
-            patch_grid_cols=cfg.patch_grid_cols,
-            min_visual_tokens=cfg.min_visual_tokens,
-            montage_tile_size=cfg.montage_tile_size,
-            output_dir=cfg.pruned_image_dir,
-        )
-        self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
-        self.visual_hook_probe = (
-            VisualTokenHookProbe(
+        self.pruner = None
+        if cfg.pruning_mode != "server_side_visual_pruning":
+            self.pruner = RetrievalPruner(
+                mode=cfg.pruning_mode,
+                keep_ratio=cfg.pruning_keep_ratio,
                 image_model_name=cfg.image_embedding_model,
                 device=cfg.retrieval_device,
+                patch_grid_rows=cfg.patch_grid_rows,
+                patch_grid_cols=cfg.patch_grid_cols,
+                min_visual_tokens=cfg.min_visual_tokens,
+                montage_tile_size=cfg.montage_tile_size,
+                output_dir=cfg.pruned_image_dir,
             )
-            if cfg.enable_visual_hook_probe
-            else None
-        )
-        self.local_vlm_runner = (
-            LocalHookedVLMRunner(
-                model_name=cfg.local_vlm_model_name,
-                device=cfg.local_generation_device,
-                dtype=cfg.local_generation_dtype,
-            )
-            if cfg.enable_local_hooked_generation and cfg.local_vlm_model_name
-            else None
-        )
+        self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
 
     def run_one(self, example: Dict) -> Dict:
         t0 = time.perf_counter()
@@ -72,7 +46,23 @@ class MMDocRAGPipeline:
         )
         t1 = time.perf_counter()
 
-        pruned_retrieval = self.pruner.apply(example, retrieval)
+        if self.cfg.pruning_mode in {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning"}:
+            pruned_retrieval = self.pruner.apply(example, retrieval)
+        else:
+            # server-side visual pruning: only retrieval-side selection stays local
+            pruned_retrieval = {
+                "selected_text_quotes": retrieval["selected_text_quotes"],
+                "selected_img_quotes": retrieval["selected_img_quotes"],
+                "pruning": {
+                    "mode": "server_side_visual_pruning",
+                    "text_before": len(retrieval["selected_text_quotes"]),
+                    "text_after": len(retrieval["selected_text_quotes"]),
+                    "images_before": len(retrieval["selected_img_quotes"]),
+                    "images_after": len(retrieval["selected_img_quotes"]),
+                    "visual_tokens_before": None,
+                    "visual_tokens_after": None,
+                },
+            }
 
         prompt = build_prompt(example, pruned_retrieval)
 
@@ -85,32 +75,27 @@ class MMDocRAGPipeline:
                     "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
                 })
 
-        extra_body = {}
-        mm_processor_kwargs = _extract_mm_processor_kwargs(pruned_retrieval, self.cfg)
-        if mm_processor_kwargs:
-            extra_body["mm_processor_kwargs"] = mm_processor_kwargs
+        t2 = time.perf_counter()
+        stream = self.client.chat.completions.create(
+            model=self.cfg.vlm_model_name,
+            messages=[{"role": "user", "content": content}],
+            temperature=self.cfg.temperature,
+            stream=True,
+        )
+        first_token_time = None
+        pieces = []
 
-            t2 = time.perf_counter()
-            stream = self.client.chat.completions.create(
-                model=self.cfg.vlm_model_name,
-                messages=[{"role": "user", "content": content}],
-                temperature=self.cfg.temperature,
-                stream=True,
-                extra_body=extra_body or None,
-            )
-            first_token_time = None
-            pieces = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            text = getattr(delta, "content", None)
+            if text:
+                if first_token_time is None:
+                    first_token_time = time.perf_counter()
+                pieces.append(text)
 
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                text = getattr(delta, "content", None)
-                if text:
-                    if first_token_time is None:
-                        first_token_time = time.perf_counter()
-                    pieces.append(text)
+        t3 = time.perf_counter()
 
-            t3 = time.perf_counter()
-            pred = "".join(pieces)
+        pred = "".join(pieces)
 
         retrieved_ids = [
             q["quote_id"] for q in pruned_retrieval["selected_text_quotes"]
