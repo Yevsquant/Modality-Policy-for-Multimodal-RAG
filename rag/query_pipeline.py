@@ -9,8 +9,17 @@ from rag.config import RAGConfig
 from rag.prompt_builder import build_prompt
 from rag.pruner import RetrievalPruner
 from rag.retriever import QuoteRetriever
-from rag.visual_hook_probe import VisualTokenHookProbe
-from rag.local_vlm_runner import LocalHookedVLMRunner
+
+def _extract_mm_processor_kwargs(pruned_retrieval: Dict, cfg: RAGConfig) -> Dict:
+    mm_kwargs: Dict = {}
+    visual_pruning = pruned_retrieval.get("visual_pruning", {}) or {}
+    if isinstance(visual_pruning, dict):
+        keep_indices = visual_pruning.get("image_keep_indices")
+        if keep_indices:
+            mm_kwargs["image_keep_indices"] = keep_indices
+    if cfg.pruning_mode == "model_internal_visual_pruning":
+        mm_kwargs.setdefault("image_keep_ratio", cfg.pruning_keep_ratio)
+    return mm_kwargs
 
 def encode_image(path: str) -> str:
     with open(path, "rb") as f:
@@ -67,27 +76,19 @@ class MMDocRAGPipeline:
 
         prompt = build_prompt(example, pruned_retrieval)
 
-        local_generation_meta = None
-        if self.local_vlm_runner is not None and self.cfg.pruning_mode == "model_internal_visual_pruning":
-            local_generation_meta = self._maybe_run_local_hooked_generation(
-                prompt=prompt,
-                selected_img_quotes=pruned_retrieval["selected_img_quotes"],
-            )
+        content = [{"type": "text", "text": prompt}]
+        for q in pruned_retrieval["selected_img_quotes"]:
+            path = q.get("local_img_path")
+            if path and Path(path).exists():
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
+                })
 
-        if local_generation_meta and local_generation_meta.get("applied"):
-            t2 = time.perf_counter()
-            pred = local_generation_meta.get("generated_text", "")
-            first_token_time = None
-            t3 = time.perf_counter()
-        else:
-            content = [{"type": "text", "text": prompt}]
-            for q in pruned_retrieval["selected_img_quotes"]:
-                path = q.get("local_img_path")
-                if path and Path(path).exists():
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
-                    })
+        extra_body = {}
+        mm_processor_kwargs = _extract_mm_processor_kwargs(pruned_retrieval, self.cfg)
+        if mm_processor_kwargs:
+            extra_body["mm_processor_kwargs"] = mm_processor_kwargs
 
             t2 = time.perf_counter()
             stream = self.client.chat.completions.create(
@@ -95,6 +96,7 @@ class MMDocRAGPipeline:
                 messages=[{"role": "user", "content": content}],
                 temperature=self.cfg.temperature,
                 stream=True,
+                extra_body=extra_body or None,
             )
             first_token_time = None
             pieces = []
@@ -127,8 +129,6 @@ class MMDocRAGPipeline:
             if q.get("visual_pruning") is not None
         ]
 
-        hook_probe_meta = self._run_visual_hook_probe(pruned_retrieval["selected_img_quotes"])
-
         return {
             "q_id": example["q_id"],
             "question": example["question"],
@@ -140,8 +140,6 @@ class MMDocRAGPipeline:
             "selected_img_quotes": pruned_retrieval["selected_img_quotes"],
             "pruning": pruned_retrieval["pruning"],
             "visual_pruning": visual_pruning_meta,
-            "visual_hook_probe": hook_probe_meta,
-            "local_hooked_generation": local_generation_meta,
             "timing": {
                 "retrieval_sec": t1 - t0,
                 "request_build_sec": t2 - t1,
@@ -150,51 +148,3 @@ class MMDocRAGPipeline:
                 "total_sec": t3 - t0,
             }
         }
-
-    def _run_visual_hook_probe(self, selected_img_quotes: List[Dict]) -> List[Dict]:
-        if self.visual_hook_probe is None:
-            return []
-
-        results = []
-        for q in selected_img_quotes:
-            visual_pruning = q.get("visual_pruning")
-            image_path = q.get("local_img_path")
-            if not visual_pruning or not image_path:
-                continue
-            if visual_pruning.get("mode") != "model_internal_visual_pruning":
-                continue
-
-            result = self.visual_hook_probe.run_on_image(
-                image_path=image_path,
-                visual_pruning=visual_pruning,
-            )
-            results.append({
-                "quote_id": q.get("quote_id"),
-                "probe": result,
-            })
-        return results
-
-    def _maybe_run_local_hooked_generation(
-        self,
-        prompt: str,
-        selected_img_quotes: List[Dict],
-    ) -> Dict:
-        if not selected_img_quotes:
-            return {"applied": False, "reason": "no_selected_images"}
-
-        q = selected_img_quotes[0]
-        visual_pruning = q.get("visual_pruning")
-        image_path = q.get("local_img_path")
-        if not visual_pruning or not image_path:
-            return {"applied": False, "reason": "missing_pruning_metadata_or_image"}
-
-        result = self.local_vlm_runner.generate(
-            prompt=prompt,
-            image_path=image_path,
-            visual_pruning=visual_pruning,
-            max_new_tokens=self.cfg.local_generation_max_new_tokens,
-        )
-        result["quote_id"] = q.get("quote_id")
-        if len(selected_img_quotes) > 1:
-            result["note"] = "local hooked generation currently uses the first selected image only"
-        return result
