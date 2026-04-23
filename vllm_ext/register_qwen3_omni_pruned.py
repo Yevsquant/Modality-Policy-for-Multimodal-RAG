@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from vllm.model_executor.models import ModelRegistry
@@ -10,30 +9,8 @@ from .qwen3_omni_pruned_processor import Qwen3OmniPrunedProcessor
 from .visual_pruning_config import VisualPruningConfig
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _resolve_visual_pruning_config(visual_pruning: Any) -> VisualPruningConfig:
-    if isinstance(visual_pruning, VisualPruningConfig):
-        return visual_pruning
-
-    if isinstance(visual_pruning, dict):
-        return VisualPruningConfig(**visual_pruning)
-
-    return VisualPruningConfig(
-        enabled=_env_bool("VLLM_VISUAL_PRUNING_ENABLED", False),
-        keep_ratio=float(os.getenv("VLLM_VISUAL_PRUNING_KEEP_RATIO", "0.5")),
-        min_keep=int(os.getenv("VLLM_VISUAL_PRUNING_MIN_KEEP", "4")),
-        policy=os.getenv("VLLM_VISUAL_PRUNING_POLICY", "uniform"),
-    )
-
-
 def build_pruned_processor(*args, **kwargs):
-    visual_pruning = _resolve_visual_pruning_config(kwargs.pop("visual_pruning", None))
+    visual_pruning = VisualPruningConfig()
     return Qwen3OmniPrunedProcessor(
         *args,
         visual_pruning=visual_pruning,

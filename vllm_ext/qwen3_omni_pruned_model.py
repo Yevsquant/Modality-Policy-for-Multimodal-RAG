@@ -15,50 +15,73 @@ except ImportError:
         Qwen3OmniMoeThinkerForConditionalGeneration as Qwen3OmniForConditionalGeneration,
     )
 
-
-def _prune_single_image_features(
-    feats: torch.Tensor,           # (T, D)
-    keep_idx: torch.Tensor,        # (K,)
-) -> torch.Tensor:
-    keep_idx = keep_idx.to(device=feats.device, dtype=torch.long)
-    return feats.index_select(0, keep_idx)
+from .visual_pruning_policy import VisualTokenPruningPolicy
 
 
-def _prune_embeddings_list(
+def _coerce_image_items(raw_image_items: Any) -> list[dict[str, Any] | None]:
+    if raw_image_items is None:
+        return []
+    if isinstance(raw_image_items, list):
+        return list(raw_image_items)
+    if isinstance(raw_image_items, tuple):
+        return list(raw_image_items)
+    return []
+
+
+def _maybe_get_policy(mm_kwargs: dict[str, Any]) -> VisualTokenPruningPolicy | None:
+    if not mm_kwargs.get("visual_pruning_enabled", False):
+        return None
+    return VisualTokenPruningPolicy(
+        keep_ratio=float(mm_kwargs.get("visual_pruning_keep_ratio", 1.0)),
+        min_keep=int(mm_kwargs.get("visual_pruning_min_keep", 1)),
+        policy=str(mm_kwargs.get("visual_pruning_policy", "embedding_l2_norm")),
+        keep_cls_token=bool(mm_kwargs.get("visual_pruning_keep_cls_token", False)),
+        normalize_scores=bool(mm_kwargs.get("visual_pruning_normalize_scores", True)),
+    )
+
+
+def _apply_embedding_pruning(
     embeddings: list[torch.Tensor] | tuple[torch.Tensor, ...],
     image_items: list[dict[str, Any] | None],
-) -> list[torch.Tensor]:
+    mm_kwargs: dict[str, Any],
+) -> tuple[list[torch.Tensor], list[dict[str, Any] | None]]:
+    policy = _maybe_get_policy(mm_kwargs)
+    if policy is None:
+        return list(embeddings), image_items
+
+    hard_prune = bool(mm_kwargs.get("visual_pruning_hard_prune", True))
+    fallback_to_soft_mask = bool(mm_kwargs.get("visual_pruning_fallback_to_soft_mask", False))
+
     pruned: list[torch.Tensor] = []
+    updated_items: list[dict[str, Any] | None] = []
+
     for feats, item_kwargs in zip(embeddings, image_items):
-        if not item_kwargs:
+        if item_kwargs is None:
             pruned.append(feats)
+            updated_items.append(item_kwargs)
             continue
-        keep_idx = item_kwargs.get("image_keep_indices", None)
-        if keep_idx is None:
-            pruned.append(feats)
+
+        item_kwargs = dict(item_kwargs)
+        keep_spec = policy.build_keep_spec_from_embeddings(feats)
+        item_kwargs["image_keep_indices"] = keep_spec.keep_indices.detach().cpu()
+        item_kwargs["image_tokens_before"] = keep_spec.tokens_before
+        item_kwargs["image_tokens_after"] = keep_spec.tokens_after
+        item_kwargs["image_token_scores"] = keep_spec.scores.detach().cpu()
+        item_kwargs["visual_pruning_deferred_to_model"] = True
+
+        if hard_prune:
+            pruned_feats = policy.prune_embeddings(feats, keep_spec.keep_indices)
+        elif fallback_to_soft_mask:
+            pruned_feats = policy.soft_mask_embeddings(feats, keep_spec.keep_indices)
+            item_kwargs["image_tokens_after"] = keep_spec.tokens_before
         else:
-            pruned.append(_prune_single_image_features(feats, keep_idx))
-    return pruned
+            # Default to hard prune if no fallback behavior is requested.
+            pruned_feats = policy.prune_embeddings(feats, keep_spec.keep_indices)
 
+        pruned.append(pruned_feats)
+        updated_items.append(item_kwargs)
 
-def _coerce_keep_indices_list(raw_keep_indices: Any) -> list[torch.Tensor]:
-    if raw_keep_indices is None:
-        return []
-    if isinstance(raw_keep_indices, torch.Tensor):
-        if raw_keep_indices.ndim == 1:
-            return [raw_keep_indices]
-        return [row for row in raw_keep_indices]
-    if isinstance(raw_keep_indices, (list, tuple)):
-        out: list[torch.Tensor] = []
-        for item in raw_keep_indices:
-            if item is None:
-                out.append(torch.empty(0, dtype=torch.long))
-            elif isinstance(item, torch.Tensor):
-                out.append(item)
-            else:
-                out.append(torch.as_tensor(item, dtype=torch.long))
-        return out
-    return []
+    return pruned, updated_items
 
 
 class Qwen3OmniPrunedForConditionalGeneration(
@@ -67,57 +90,46 @@ class Qwen3OmniPrunedForConditionalGeneration(
 ):
     """
     Keep Qwen3-Omni thinker unchanged.
-    Only prune image token embeddings in the multimodal embedding path.
+    Compute pruning decisions from image embedding values in the multimodal
+    embedding path, instead of from token positions/counts in the processor.
     """
 
     def get_multimodal_embeddings(self, **mm_kwargs: Any):
-        """
-        Let the parent produce normal multimodal embeddings, then prune image embeddings.
-        """
         parent_fn = getattr(super(), "get_multimodal_embeddings", None)
         if parent_fn is None:
             return None
         mm_embeds = parent_fn(**mm_kwargs)
 
+        image_items = _coerce_image_items(mm_kwargs.get("image"))
         if (
             isinstance(mm_embeds, dict)
             and "image" in mm_embeds
-            and "image" in mm_kwargs
+            and image_items
         ):
-            mm_embeds["image"] = _prune_embeddings_list(
+            pruned, updated_items = _apply_embedding_pruning(
                 mm_embeds["image"],
-                list(mm_kwargs["image"]),
+                image_items,
+                mm_kwargs,
             )
+            mm_embeds["image"] = pruned
+            mm_kwargs["image"] = updated_items
             return mm_embeds
 
         return mm_embeds
 
     def embed_multimodal(self, **kwargs: object):
-        """
-        Upstream vLLM path: prune image embeddings after parent vision encoding.
-        """
         mm_embeds = super().embed_multimodal(**kwargs)
         if not mm_embeds:
             return mm_embeds
 
-        embeds_list = list(mm_embeds)
-        image_items = kwargs.get("image")
-        if image_items:
-            pruned = _prune_embeddings_list(embeds_list, list(image_items))
-            return tuple(pruned)
-
-        keep_indices_list = _coerce_keep_indices_list(kwargs.get("image_keep_indices"))
-        if not keep_indices_list:
+        image_items = _coerce_image_items(kwargs.get("image"))
+        if not image_items:
             return mm_embeds
 
-        pruned: list[torch.Tensor] = []
-        for idx, feats in enumerate(embeds_list):
-            if idx >= len(keep_indices_list):
-                pruned.append(feats)
-                continue
-            keep_idx = keep_indices_list[idx]
-            if keep_idx.numel() == 0:
-                pruned.append(feats)
-                continue
-            pruned.append(_prune_single_image_features(feats, keep_idx))
+        pruned, updated_items = _apply_embedding_pruning(
+            list(mm_embeds),
+            image_items,
+            dict(kwargs),
+        )
+        kwargs["image"] = updated_items
         return tuple(pruned)

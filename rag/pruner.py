@@ -44,7 +44,7 @@ class RetrievalPruner:
       - visual_only_pruning
       - visual_patch_pruning
       - model_internal_visual_pruning
-
+      - server_side_embedding_visual_pruning
     Notes:
       * visual_patch_pruning is server-compatible: it rewrites each selected image into
         a smaller montage of kept patches so the served model sees fewer visual patches.
@@ -59,6 +59,7 @@ class RetrievalPruner:
         "visual_only_pruning",
         "visual_patch_pruning",
         "model_internal_visual_pruning",
+        "server_side_embedding_visual_pruning",
     }
 
     def __init__(
@@ -114,7 +115,9 @@ class RetrievalPruner:
         visual_before = sum(self._estimate_visual_tokens(q) for q in img_quotes)
         visual_after = visual_before
 
-        if self.mode == "uniform_pruning":
+        if self.mode == "server_side_embedding_visual_pruning":
+            visual_after = visual_before
+        elif self.mode == "uniform_pruning":
             pruned_texts = self._prune_list(text_quotes)
             pruned_images = self._prune_list(img_quotes)
             visual_after = sum(self._estimate_visual_tokens(q) for q in pruned_images)

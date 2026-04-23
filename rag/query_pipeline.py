@@ -22,19 +22,17 @@ class MMDocRAGPipeline:
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
         )
-        self.pruner = None
-        if cfg.pruning_mode != "server_side_visual_pruning":
-            self.pruner = RetrievalPruner(
-                mode=cfg.pruning_mode,
-                keep_ratio=cfg.pruning_keep_ratio,
-                image_model_name=cfg.image_embedding_model,
-                device=cfg.retrieval_device,
-                patch_grid_rows=cfg.patch_grid_rows,
-                patch_grid_cols=cfg.patch_grid_cols,
-                min_visual_tokens=cfg.min_visual_tokens,
-                montage_tile_size=cfg.montage_tile_size,
-                output_dir=cfg.pruned_image_dir,
-            )
+        self.pruner = RetrievalPruner(
+            mode=cfg.pruning_mode,
+            keep_ratio=cfg.pruning_keep_ratio,
+            image_model_name=cfg.image_embedding_model,
+            device=cfg.retrieval_device,
+            patch_grid_rows=cfg.patch_grid_rows,
+            patch_grid_cols=cfg.patch_grid_cols,
+            min_visual_tokens=cfg.min_visual_tokens,
+            montage_tile_size=cfg.montage_tile_size,
+            output_dir=cfg.pruned_image_dir,
+        )
         self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
 
     def run_one(self, example: Dict) -> Dict:
@@ -46,15 +44,13 @@ class MMDocRAGPipeline:
         )
         t1 = time.perf_counter()
 
-        if self.cfg.pruning_mode in {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning"}:
-            pruned_retrieval = self.pruner.apply(example, retrieval)
-        else:
+        if self.cfg.pruning_mode == "server_side_embedding_visual_pruning":
             # server-side visual pruning: only retrieval-side selection stays local
             pruned_retrieval = {
                 "selected_text_quotes": retrieval["selected_text_quotes"],
                 "selected_img_quotes": retrieval["selected_img_quotes"],
                 "pruning": {
-                    "mode": "server_side_visual_pruning",
+                    "mode": "server_side_embedding_visual_pruning",
                     "text_before": len(retrieval["selected_text_quotes"]),
                     "text_after": len(retrieval["selected_text_quotes"]),
                     "images_before": len(retrieval["selected_img_quotes"]),
@@ -63,6 +59,8 @@ class MMDocRAGPipeline:
                     "visual_tokens_after": None,
                 },
             }
+        else:
+            pruned_retrieval = self.pruner.apply(example, retrieval)
 
         prompt = build_prompt(example, pruned_retrieval)
 

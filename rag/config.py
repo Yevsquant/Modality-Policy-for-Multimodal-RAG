@@ -17,8 +17,8 @@ class RAGConfig:
 
     # pruning baselines
     pruning_keep_ratio: float = 0.5
-    # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "model_internal_visual_pruning", "server_side_visual_pruning" }
-    pruning_mode: str = "server_side_visual_pruning" 
+    # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "model_internal_visual_pruning", "server_side_embedding_visual_pruning"}
+    pruning_mode: str = "server_side_embedding_visual_pruning" 
     patch_grid_rows: int = 4
     patch_grid_cols: int = 4
     min_visual_tokens: int = 4
@@ -35,4 +35,4 @@ class RAGConfig:
     judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
     # eval
-    max_examples: int = 50   # start small for baseline
+    max_examples: int = 30   # start small for baseline
