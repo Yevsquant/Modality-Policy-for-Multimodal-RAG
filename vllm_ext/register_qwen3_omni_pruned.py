@@ -6,14 +6,11 @@ from vllm.model_executor.models import ModelRegistry
 
 from .qwen3_omni_pruned_model import Qwen3OmniPrunedForConditionalGeneration
 from .qwen3_omni_pruned_processor import Qwen3OmniPrunedProcessor
-from .visual_pruning_config import VisualPruningConfig
 
 
 def build_pruned_processor(*args, **kwargs):
-    visual_pruning = VisualPruningConfig()
     return Qwen3OmniPrunedProcessor(
         *args,
-        visual_pruning=visual_pruning,
         **kwargs,
     )
 
@@ -22,6 +19,7 @@ def _register_pruned_model() -> None:
     architecture_names = [
         "Qwen3OmniForConditionalGeneration",
         "Qwen3OmniMoeThinkerForConditionalGeneration",
+        "Qwen3OmniMoeForConditionalGeneration",
     ]
     for arch in architecture_names:
         ModelRegistry.register_model(arch, Qwen3OmniPrunedForConditionalGeneration)

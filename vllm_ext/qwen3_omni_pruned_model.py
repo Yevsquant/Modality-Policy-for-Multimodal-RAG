@@ -16,6 +16,7 @@ except ImportError:
     )
 
 from .visual_pruning_policy import VisualTokenPruningPolicy
+from .visual_pruning_config import VisualPruningConfig
 
 
 def _coerce_image_items(raw_image_items: Any) -> list[dict[str, Any] | None]:
@@ -29,14 +30,18 @@ def _coerce_image_items(raw_image_items: Any) -> list[dict[str, Any] | None]:
 
 
 def _maybe_get_policy(mm_kwargs: dict[str, Any]) -> VisualTokenPruningPolicy | None:
-    if not mm_kwargs.get("visual_pruning_enabled", False):
+    # Fallback to direct config instantiation if engine stripped the kwargs
+    config = VisualPruningConfig()
+    
+    is_enabled = mm_kwargs.get("visual_pruning_enabled", config.enabled)
+    if not is_enabled:
         return None
     return VisualTokenPruningPolicy(
-        keep_ratio=float(mm_kwargs.get("visual_pruning_keep_ratio", 1.0)),
-        min_keep=int(mm_kwargs.get("visual_pruning_min_keep", 1)),
-        policy=str(mm_kwargs.get("visual_pruning_policy", "embedding_l2_norm")),
-        keep_cls_token=bool(mm_kwargs.get("visual_pruning_keep_cls_token", False)),
-        normalize_scores=bool(mm_kwargs.get("visual_pruning_normalize_scores", True)),
+        keep_ratio=float(mm_kwargs.get("visual_pruning_keep_ratio", config.keep_ratio)),
+        min_keep=int(mm_kwargs.get("visual_pruning_min_keep", config.min_keep)),
+        policy=str(mm_kwargs.get("visual_pruning_policy", config.policy)),
+        keep_cls_token=bool(mm_kwargs.get("visual_pruning_keep_cls_token", config.keep_cls_token)),
+        normalize_scores=bool(mm_kwargs.get("visual_pruning_normalize_scores", config.normalize_scores)),
     )
 
 
@@ -101,11 +106,11 @@ class Qwen3OmniPrunedForConditionalGeneration(
         mm_embeds = parent_fn(**mm_kwargs)
 
         image_items = _coerce_image_items(mm_kwargs.get("image"))
-        if (
-            isinstance(mm_embeds, dict)
-            and "image" in mm_embeds
-            and image_items
-        ):
+        if isinstance(mm_embeds, dict) and "image" in mm_embeds:
+            # Auto-generate tracking dicts if 'image' was stripped/missing
+            if not image_items:
+                 image_items = [{} for _ in range(len(mm_embeds["image"]))]
+
             pruned, updated_items = _apply_embedding_pruning(
                 mm_embeds["image"],
                 image_items,
@@ -123,8 +128,9 @@ class Qwen3OmniPrunedForConditionalGeneration(
             return mm_embeds
 
         image_items = _coerce_image_items(kwargs.get("image"))
+        # Auto-generate tracking dicts if 'image' was stripped/missing
         if not image_items:
-            return mm_embeds
+            image_items = [{} for _ in range(len(mm_embeds))]
 
         pruned, updated_items = _apply_embedding_pruning(
             list(mm_embeds),

@@ -7,8 +7,23 @@ from vllm.multimodal.processing.inputs import ProcessorInputs
 
 from .visual_pruning_config import VisualPruningConfig
 
+try:
+    from vllm_omni.model_executor.models.qwen3_omni import (
+        Qwen3OmniMultiModalProcessor as BaseProcessor
+    )
+except ImportError:
+    try:
+        from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+            Qwen3OmniMoeThinkerMultiModalProcessor as BaseProcessor
+        )
+    except ImportError:
+        # Fallback: Qwen3-Omni usually relies on Qwen2-VL's processor architecture
+        from vllm.model_executor.models.qwen2_vl import (
+            Qwen2VLMultiModalProcessor as BaseProcessor
+        )
 
-class Qwen3OmniPrunedProcessor(BaseMultiModalProcessor):
+
+class Qwen3OmniPrunedProcessor(BaseProcessor):
     """
     Embedding-based pruning rollout.
 
@@ -21,9 +36,9 @@ class Qwen3OmniPrunedProcessor(BaseMultiModalProcessor):
     decision uses actual image embedding values later in qwen3_omni_pruned_model.py.
     """
 
-    def __init__(self, *args, visual_pruning: VisualPruningConfig | None = None, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.visual_pruning = visual_pruning or VisualPruningConfig()
+        self.visual_pruning = VisualPruningConfig()
 
     def apply(self, inputs: ProcessorInputs, timing_ctx):
         mm_input = super().apply(inputs, timing_ctx)
