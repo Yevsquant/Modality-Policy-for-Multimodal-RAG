@@ -52,23 +52,24 @@ class Qwen3OmniPrunedProcessor(BaseProcessor):
         mm_kwargs = deepcopy(mm_input.get("mm_kwargs", {}))
         if not isinstance(mm_kwargs, dict):
             return mm_input
-
-        # mm_placeholders = dict(mm_input["mm_placeholders"])
+        if self.visual_pruning.hard_prune:
+            mm_placeholders = dict(mm_input["mm_placeholders"])
+            
+            if "image" not in mm_placeholders or "image_grid_thw" not in mm_kwargs:
+                print("We got image but we denied that :)") # del
+                return mm_input
+            
+            image_ranges = mm_placeholders["image"]
+            grid_thw = mm_kwargs["image_grid_thw"]
+            for i, old_range in enumerate(image_ranges):
+                num_tokens = grid_thw[i][1].item() * grid_thw[i][2].item()
+                # spec = build_keep_spec(self.visual_pruning.min_keep,
+                #                        self.visual_pruning.keep_ratio,
+                #                        num_tokens,
+                #                        False)
+                old_range.length = calculate_keep_n(self.visual_pruning.min_keep, self.visual_pruning.keep_ratio, num_tokens)
+            mm_placeholders["image"] = image_ranges
         
-        # if "image" not in mm_placeholders or "image_grid_thw" not in mm_kwargs:
-        #     print("We got image but we denied that :)") # del
-        #     return mm_input
-        
-        # image_ranges = mm_placeholders["image"]
-        # grid_thw = mm_kwargs["image_grid_thw"]
-        # for i, old_range in enumerate(image_ranges):
-        #     num_tokens = grid_thw[i][1].item() * grid_thw[i][2].item()
-        #     # spec = build_keep_spec(self.visual_pruning.min_keep,
-        #     #                        self.visual_pruning.keep_ratio,
-        #     #                        num_tokens,
-        #     #                        False)
-        #     old_range.length = calculate_keep_n(self.visual_pruning.min_keep, self.visual_pruning.keep_ratio, num_tokens)
-        # mm_placeholders["image"] = image_ranges
 
         mm_kwargs["visual_pruning_enabled"] = True
         mm_kwargs["visual_pruning_policy"] = self.visual_pruning.policy
