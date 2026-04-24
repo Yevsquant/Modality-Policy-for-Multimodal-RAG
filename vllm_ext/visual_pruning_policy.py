@@ -94,3 +94,56 @@ class VisualTokenPruningPolicy:
         masked = torch.zeros_like(image_embeds)
         masked[keep_indices] = image_embeds[keep_indices]
         return masked
+
+def calculate_keep_n(min_keep: int, keep_ratio: float, num_tokens: int) -> int:
+    """the length of the target token seq, same as _resolve_keep_n, for external call"""
+    if num_tokens <= 0:
+        raise ValueError(f"num_tokens must be > 0, got {num_tokens}")
+    keep_n = max(min_keep, int(num_tokens * keep_ratio))
+    return min(max(1, keep_n), num_tokens)
+    
+def build_keep_spec(
+    min_keep: int,
+    keep_ratio: float,
+    num_tokens: int,
+    keep_cls_token: bool = False,
+    device: torch.device = torch.device("cpu")
+) -> ImageKeepSpec:
+    """
+    Generate a keep specification without needing embeddings. 
+    Used in the Processor to decide the sequence length before 
+    GPU allocation occurs.
+    """
+    if num_tokens <= 0:
+        return ImageKeepSpec(
+            keep_indices=torch.empty(0, device=device, dtype=torch.long),
+            tokens_before=0,
+            tokens_after=0,
+            scores=torch.empty(0, device=device)
+        )
+
+    # 1. Resolve the budget (how many tokens to keep)
+    keep_n = calculate_keep_n(min_keep, keep_ratio, num_tokens)
+    
+    # 2. Strategy: Uniform Sampling
+    # This is position-based and requires no embedding values, 
+    # making it safe to run in the processor.
+    pos = torch.linspace(0, num_tokens - 1, steps=keep_n, device=device)
+    keep = torch.unique(pos.round().long(), sorted=True)
+    
+    # Ensure the count matches keep_n exactly after unique/rounding
+    if keep.numel() > keep_n:
+        keep = keep[:keep_n]
+        
+    # 3. Optional: Force keep the CLS token if configured
+    if keep_cls_token:
+        cls_idx = torch.tensor([0], device=device, dtype=torch.long)
+        keep = torch.unique(torch.cat([cls_idx, keep]), sorted=True)
+
+    return ImageKeepSpec(
+        keep_indices=keep,
+        tokens_before=num_tokens,
+        tokens_after=int(keep.numel()),
+        # Processor has no embedding-based scores yet
+        scores=torch.ones(num_tokens, device=device, dtype=torch.float32)
+    )

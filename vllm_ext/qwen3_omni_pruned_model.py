@@ -54,8 +54,9 @@ def _apply_embedding_pruning(
     if policy is None:
         return list(embeddings), image_items
 
-    hard_prune = bool(mm_kwargs.get("visual_pruning_hard_prune", True))
-    fallback_to_soft_mask = bool(mm_kwargs.get("visual_pruning_fallback_to_soft_mask", False))
+    config = VisualPruningConfig()
+    hard_prune = bool(mm_kwargs.get("visual_pruning_hard_prune", config.hard_prune))
+    fallback_to_soft_mask = bool(mm_kwargs.get("visual_pruning_fallback_to_soft_mask", config.fallback_to_soft_mask))
 
     pruned: list[torch.Tensor] = []
     updated_items: list[dict[str, Any] | None] = []
