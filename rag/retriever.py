@@ -7,6 +7,17 @@ from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import CLIPModel, CLIPProcessor
 
+
+def _clip_features_to_tensor(raw: object) -> torch.Tensor:
+    """Transformers 5.x returns BaseModelOutputWithPooling from get_*_features; older stacks returned a tensor."""
+    if isinstance(raw, torch.Tensor):
+        return raw
+    po = getattr(raw, "pooler_output", None)
+    if po is not None:
+        return po
+    raise TypeError(f"Unexpected CLIP feature output type: {type(raw)}")
+
+
 class QuoteRetriever:
     def __init__(
         self,
@@ -37,7 +48,8 @@ class QuoteRetriever:
                 padding=True,
                 truncation=True,
             ).to(self.device)
-            feats = self.clip_model.get_text_features(**inputs)
+            raw_feats = self.clip_model.get_text_features(**inputs)
+            feats = _clip_features_to_tensor(raw_feats)
             feats = feats / feats.norm(dim=-1, keepdim=True)
         return feats.cpu().numpy().astype("float32")
 
@@ -65,7 +77,8 @@ class QuoteRetriever:
                 return_tensors="pt",
                 padding=True,
             ).to(self.device)
-            feats = self.clip_model.get_image_features(**inputs)
+            raw_feats = self.clip_model.get_image_features(**inputs)
+            feats = _clip_features_to_tensor(raw_feats)
             feats = feats / feats.norm(dim=-1, keepdim=True)
 
         return feats.cpu().numpy().astype("float32"), valid_idx

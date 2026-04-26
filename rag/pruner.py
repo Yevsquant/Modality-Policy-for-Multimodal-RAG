@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
 from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import CLIPModel, CLIPProcessor
+
+from rag.retriever import _clip_features_to_tensor
 
 
 @dataclass(frozen=True)
@@ -233,11 +233,15 @@ class RetrievalPruner:
             text_inputs = self.clip_processor(
                 text=[query], return_tensors="pt", padding=True, truncation=True
             ).to(self.device)
-            text_feats = self.clip_model.get_text_features(**text_inputs)
+            text_feats = _clip_features_to_tensor(
+                self.clip_model.get_text_features(**text_inputs)
+            )
             text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
 
             image_inputs = self.clip_processor(images=tiles, return_tensors="pt", padding=True).to(self.device)
-            img_feats = self.clip_model.get_image_features(**image_inputs)
+            img_feats = _clip_features_to_tensor(
+                self.clip_model.get_image_features(**image_inputs)
+            )
             img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
             sims = (img_feats @ text_feats.T).squeeze(-1)
