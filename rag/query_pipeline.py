@@ -1,14 +1,12 @@
 import base64
 import time
 from pathlib import Path
-from typing import Dict, List
-from PIL import Image
+from typing import Dict
 
 from openai import OpenAI
 
 from rag.config import RAGConfig
 from rag.prompt_builder import build_prompt
-from rag.qwen2vl_catp_pruner import Qwen2VLCATPBoundingBoxCropper
 from rag.pruner import RetrievalPruner
 from rag.retriever import QuoteRetriever
 
@@ -24,10 +22,8 @@ class MMDocRAGPipeline:
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
         )
-        self.smart_cropper = Qwen2VLCATPBoundingBoxCropper()
         self.pruner = RetrievalPruner(
-            # mode=cfg.pruning_mode,
-            mode="no_pruning",
+            mode=cfg.pruning_mode,
             keep_ratio=cfg.pruning_keep_ratio,
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
@@ -57,22 +53,10 @@ class MMDocRAGPipeline:
         for q in pruned_retrieval["selected_img_quotes"]:
             path = q.get("local_img_path")
             if path and Path(path).exists():
-                if self.cfg.pruning_mode == "catp_pruning":
-                    img = Image.open(path).convert("RGB")
-                    pruned_b64 = self.smart_cropper.get_pruned_image_base64(
-                            image=img, 
-                            query=example["question"], 
-                            keep_ratio=self.cfg.pruning_keep_ratio
-                    )
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": pruned_b64}
-                    })
-                else:
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
-                    })
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
+                })
 
         t2 = time.perf_counter()
         stream = self.client.chat.completions.create(

@@ -43,14 +43,12 @@ class RetrievalPruner:
       - uniform_pruning
       - visual_only_pruning
       - visual_patch_pruning
-      - model_internal_visual_pruning
-      - server_side_embedding_visual_pruning
+      - catp_pruning
     Notes:
       * visual_patch_pruning is server-compatible: it rewrites each selected image into
         a smaller montage of kept patches so the served model sees fewer visual patches.
-      * model_internal_visual_pruning cannot directly alter a remote served model from
-        query_pipeline.py. Instead, it computes and returns the keep-mask / keep-indices
-        that a model-side hook could consume later.
+      * catp_pruning is also server-compatible: it rewrites each selected image into
+        the Qwen2-VL CATP cropped image selected from query-to-image attention.
     """
 
     SUPPORTED_MODES = {
@@ -58,8 +56,7 @@ class RetrievalPruner:
         "uniform_pruning",
         "visual_only_pruning",
         "visual_patch_pruning",
-        "model_internal_visual_pruning",
-        "server_side_embedding_visual_pruning",
+        "catp_pruning",
     }
 
     def __init__(
@@ -97,7 +94,8 @@ class RetrievalPruner:
         self.image_model_name = image_model_name
         self.clip_processor = None
         self.clip_model = None
-        if mode in {"visual_patch_pruning", "model_internal_visual_pruning"}:
+        self.catp_cropper = None
+        if mode == "visual_patch_pruning":
             if not image_model_name:
                 raise ValueError(
                     "image_model_name is required for visual patch pruning modes."
@@ -105,6 +103,10 @@ class RetrievalPruner:
             self.clip_processor = CLIPProcessor.from_pretrained(image_model_name)
             self.clip_model = CLIPModel.from_pretrained(image_model_name).to(self.device)
             self.clip_model.eval()
+        elif mode == "catp_pruning":
+            from rag.qwen2vl_catp_pruner import Qwen2VLCATPBoundingBoxCropper
+
+            self.catp_cropper = Qwen2VLCATPBoundingBoxCropper(device=str(self.device))
 
     def apply(self, example: Dict, retrieval: Dict) -> Dict:
         text_quotes = list(retrieval.get("selected_text_quotes", []))
@@ -115,21 +117,31 @@ class RetrievalPruner:
         visual_before = sum(self._estimate_visual_tokens(q) for q in img_quotes)
         visual_after = visual_before
 
-        if self.mode == "server_side_embedding_visual_pruning":
-            visual_after = visual_before
-        elif self.mode == "uniform_pruning":
+        if self.mode == "uniform_pruning":
             pruned_texts = self._prune_list(text_quotes)
             pruned_images = self._prune_list(img_quotes)
             visual_after = sum(self._estimate_visual_tokens(q) for q in pruned_images)
         elif self.mode == "visual_only_pruning":
             pruned_images = self._prune_list(img_quotes)
             visual_after = sum(self._estimate_visual_tokens(q) for q in pruned_images)
-        elif self.mode in {"visual_patch_pruning", "model_internal_visual_pruning"}:
+        elif self.mode == "visual_patch_pruning":
             processed = []
+            visual_before = 0
             visual_after = 0
             for q in img_quotes:
                 new_q, before_i, after_i = self._patch_prune_image(example, q)
                 processed.append(new_q)
+                visual_before += before_i
+                visual_after += after_i
+            pruned_images = processed
+        elif self.mode == "catp_pruning":
+            processed = []
+            visual_before = 0
+            visual_after = 0
+            for q in img_quotes:
+                new_q, before_i, after_i = self._catp_prune_image(example, q)
+                processed.append(new_q)
+                visual_before += before_i
                 visual_after += after_i
             pruned_images = processed
 
@@ -197,17 +209,52 @@ class RetrievalPruner:
             "scores": [float(scores[i]) for i in keep_idx],
         }
 
-        if self.mode == "visual_patch_pruning":
-            kept_tiles = [tiles[i] for i in keep_idx]
-            pruned_path = self._save_montage(image_path=Path(img_path), kept_tiles=kept_tiles)
-            q["local_img_path"] = str(pruned_path)
-            q["visual_pruning"]["rendered_image_path"] = str(pruned_path)
-        else:
-            q["visual_pruning"]["hook_required"] = True
-            q["visual_pruning"]["hook_point"] = (
-                "after vision encoder patch embeddings, before projector / multimodal merge"
-            )
+        kept_tiles = [tiles[i] for i in keep_idx]
+        pruned_path = self._save_montage(image_path=Path(img_path), kept_tiles=kept_tiles)
+        q["local_img_path"] = str(pruned_path)
+        q["visual_pruning"]["rendered_image_path"] = str(pruned_path)
 
+        return q, before, after
+
+    def _catp_prune_image(self, example: Dict, q: Dict) -> Tuple[Dict, int, int]:
+        img_path = q.get("local_img_path")
+        before = self.patch_grid_rows * self.patch_grid_cols
+        after = before
+        if not img_path or not Path(img_path).exists():
+            q["visual_pruning"] = {
+                "mode": self.mode,
+                "skipped": True,
+                "reason": "missing_image",
+                "tokens_before": before,
+                "tokens_after": after,
+            }
+            return q, before, after
+
+        assert self.catp_cropper is not None
+        image_path = Path(img_path)
+        image = Image.open(image_path).convert("RGB")
+        pruned_image, meta = self.catp_cropper.get_pruned_image(
+            image=image,
+            query=example["question"],
+            keep_ratio=self.keep_ratio,
+        )
+
+        before = int(meta.get("tokens_before", before))
+        after = int(meta.get("tokens_after", after))
+        pruned_path = self._save_pruned_image(
+            image_path=image_path,
+            image=pruned_image,
+            mode=self.mode,
+        )
+
+        q["local_img_path"] = str(pruned_path)
+        q["visual_pruning"] = {
+            "mode": self.mode,
+            **meta,
+            "tokens_before": before,
+            "tokens_after": after,
+            "rendered_image_path": str(pruned_path),
+        }
         return q, before, after
 
     def _extract_grid_tiles(self, image: Image.Image) -> Tuple[List[Image.Image], List[List[int]]]:
@@ -265,4 +312,11 @@ class RetrievalPruner:
         out_name = f"{image_path.stem}_pruned_{self.mode}_{int(self.keep_ratio * 100)}{image_path.suffix}"
         out_path = self.output_dir / out_name
         canvas.save(out_path)
+        return out_path
+
+    def _save_pruned_image(self, image_path: Path, image: Image.Image, mode: str) -> Path:
+        suffix = image_path.suffix or ".jpg"
+        out_name = f"{image_path.stem}_pruned_{mode}_{int(self.keep_ratio * 100)}{suffix}"
+        out_path = self.output_dir / out_name
+        image.save(out_path)
         return out_path

@@ -17,7 +17,7 @@ class RAGConfig:
 
     # pruning baselines
     pruning_keep_ratio: float = 0.25
-    # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "model_internal_visual_pruning", "server_side_embedding_visual_pruning"}
+    # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "catp_pruning"}
     pruning_mode: str = "catp_pruning" 
     patch_grid_rows: int = 4
     patch_grid_cols: int = 4

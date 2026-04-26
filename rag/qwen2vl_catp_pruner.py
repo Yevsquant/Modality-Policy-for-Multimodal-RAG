@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import base64
 import io
+from typing import Any, Dict, Tuple
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 class Qwen2VLCATPBoundingBoxCropper:
@@ -26,10 +27,15 @@ class Qwen2VLCATPBoundingBoxCropper:
         )
         self.model.eval()
 
-    def get_pruned_image_base64(self, image: Image.Image, query: str, keep_ratio: float = 0.3) -> str:
+    def get_pruned_image(
+        self,
+        image: Image.Image,
+        query: str,
+        keep_ratio: float = 0.3,
+    ) -> Tuple[Image.Image, Dict[str, Any]]:
         """
         Executes CATP Attention-Based Pruning using Qwen2-VL's dynamic spatial grid.
-        Returns a base64 string of the cropped bounding box.
+        Returns the cropped image and pruning metadata.
         """
         width, height = image.size
 
@@ -71,9 +77,8 @@ class Qwen2VLCATPBoundingBoxCropper:
             image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
 
         image_token_indices = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
-        
-        # The text query tokens appear AFTER the image tokens in the sequence
-        last_img_idx = image_token_indices[-1].item()
+        if image_token_indices.numel() == 0:
+            raise ValueError("Could not find image tokens in input_ids.")
         
         # Find query token idx
         query_ids = self.processor.tokenizer(
@@ -101,7 +106,9 @@ class Qwen2VLCATPBoundingBoxCropper:
 
         # Identify Top K Patches
         k = max(1, int(num_image_tokens * keep_ratio))
-        top_k_indices = torch.topk(patch_importance, k).indices.cpu().numpy()
+        top_k = torch.topk(patch_importance, k)
+        top_k_indices = top_k.indices.cpu().numpy()
+        top_k_scores = top_k.values.detach().float().cpu().tolist()
 
         # Translate 1D Tokens back to 2D Bounding Box
         # Qwen2-VL flattens the grid row-by-row
@@ -130,8 +137,31 @@ class Qwen2VLCATPBoundingBoxCropper:
         
         # 7. Physical Safe Crop
         cropped_image = image.crop((x_min, y_min, x_max, y_max))
-        
-        # 8. Encode to Base64 for the prompt builder
+
+        metadata = {
+            "tokens_before": num_image_tokens,
+            "tokens_after": k,
+            "qwen_grid_thw": [int(grid_t), int(grid_h), int(grid_w)],
+            "merged_grid_h": int(merged_grid_h),
+            "merged_grid_w": int(merged_grid_w),
+            "merge_size": int(merge_size),
+            "keep_indices": [int(i) for i in top_k_indices.tolist()],
+            "keep_grid_xy": [
+                [int(x), int(y)] for x, y in zip(patch_x.tolist(), patch_y.tolist())
+            ],
+            "scores": [float(score) for score in top_k_scores],
+            "crop_box": [int(x_min), int(y_min), int(x_max), int(y_max)],
+        }
+
+        return cropped_image, metadata
+
+    def get_pruned_image_base64(self, image: Image.Image, query: str, keep_ratio: float = 0.3) -> str:
+        """
+        Executes CATP Attention-Based Pruning and returns a base64 string.
+        Kept for compatibility; pruner.py should use get_pruned_image().
+        """
+        cropped_image, _ = self.get_pruned_image(image, query, keep_ratio)
+
         buffered = io.BytesIO()
         cropped_image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
