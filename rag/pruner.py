@@ -104,7 +104,7 @@ class RetrievalPruner:
             self.clip_model = CLIPModel.from_pretrained(image_model_name).to(self.device)
             self.clip_model.eval()
         elif mode == "catp_pruning":
-            from rag.qwen2vl_catp_pruner import Qwen2VLCATPBoundingBoxCropper
+            from rag.qwen2vl_catp_pruner_v2 import Qwen2VLCATPBoundingBoxCropper
 
             self.catp_cropper = Qwen2VLCATPBoundingBoxCropper(device=str(self.device))
 
