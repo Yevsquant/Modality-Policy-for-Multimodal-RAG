@@ -39,3 +39,13 @@ class RAGConfig:
 
     # eval
     max_examples: int = 100   # start small for baseline
+
+    # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
+    benchmark: str = "mmdocrag"
+    vqa_hf_dataset: str = "HuggingFaceM4/VQAv2"
+    vqa_hf_split: str = "validation"
+    vqa_hf_revision: str | None = None
+    vqa_hf_auto_fallback: bool = True
+    vqa_hf_fallback_dataset: str = "Multimodal-Fatima/VQAv2_sample_validation"
+    vqa_hf_fallback_split: str = "validation"
+    vqa_image_cache_dir: Path = Path("data/vqav2/image_cache")

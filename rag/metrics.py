@@ -183,6 +183,7 @@ def aggregate_summary(rows: List[Dict]) -> Dict:
         "em",
         "f1",
         "retrieval_recall",
+        "vqa_acc",
         "judge_correct",
         "judge_score",
         "judge_faithful",
