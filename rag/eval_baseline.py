@@ -70,7 +70,7 @@ def run_offline_judge(cfg: RAGConfig, predictions_file: Path | None = None):
     judge_client = OpenAI(base_url=cfg.judge_api_base, api_key="EMPTY")
 
     for i, row in enumerate(rows, start=1):
-        evidence = build_evidence_text(row)
+        # evidence = build_evidence_text(row)
         judge = llm_judge(
             client=judge_client,
             judge_model=cfg.judge_model_name,
@@ -99,6 +99,7 @@ def run_offline_judge(cfg: RAGConfig, predictions_file: Path | None = None):
     summary = aggregate_summary(rows)
     summary["pruning_mode"] = cfg.pruning_mode
     summary["pruning_keep_ratio"] = cfg.pruning_keep_ratio
+
     results = {
         "summary": summary,
         "rows": rows,

@@ -6,6 +6,13 @@ max_local_disk_size: 20.0
 extra_config: {'use_odirect': False}
 cache_policy: "LRU"
 
+# Blending related config
+lmcache_enable_blending: "True"
+lmcache_blend_special_str: " # # "
+lmcache_use_layerwise: "True"
+lmcache_blend_check_layers: "1"
+lmcache_blend_recompute_ratios: "0.15"
+
 # chunk_size: 256
 # local_cpu: false
 # max_local_cpu_size: 0.0

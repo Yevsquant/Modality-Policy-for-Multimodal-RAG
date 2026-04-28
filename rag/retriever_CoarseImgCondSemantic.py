@@ -96,15 +96,31 @@ class QuoteRetriever:
             return vec
         return vec / norm
 
-    def _image_conditioned_clip_tag(
+    def _fast_image_conditioned_tag(
         self,
         query_emb: np.ndarray,
         img_emb: np.ndarray,
+        alpha: float = 0.7,
     ) -> List[float]:
-        image_context = self._normalize_vector(img_emb)
-        tag = self._normalize_vector(query_emb * image_context)
-        if np.linalg.norm(tag) == 0.0:
-            tag = image_context
+        q = self._normalize_vector(query_emb)
+        i = self._normalize_vector(img_emb)
+
+        # How relevant this image is to the query
+        sim = float(q @ i)
+
+        # Gate query by image relevance
+        # If image and query are highly related, tag becomes more image-conditioned.
+        # If weakly related, keep more query information.
+        gate = max(0.0, min(1.0, (sim + 1.0) / 2.0))
+
+        # Combine multiplicative interaction + residual image/query semantics
+        interaction = self._normalize_vector(q * i)
+
+        tag = self._normalize_vector(
+            alpha * interaction +
+            (1.0 - alpha) * (gate * i + (1.0 - gate) * q)
+        )
+
         return tag.astype(float).tolist()
 
     def retrieve(self, example: Dict, text_top_k: int = 4, image_top_k: int = 2) -> Dict:

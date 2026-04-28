@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -15,8 +16,6 @@ from rag.retriever import _clip_features_to_tensor
 @dataclass(frozen=True)
 class PruningStats:
     mode: str
-    text_before: int
-    text_after: int
     images_before: int
     images_after: int
     visual_tokens_before: int
@@ -25,8 +24,6 @@ class PruningStats:
     def to_dict(self) -> Dict[str, int | str]:
         return {
             "mode": self.mode,
-            "text_before": self.text_before,
-            "text_after": self.text_after,
             "images_before": self.images_before,
             "images_after": self.images_after,
             "visual_tokens_before": self.visual_tokens_before,
@@ -108,9 +105,9 @@ class RetrievalPruner:
 
             self.catp_cropper = Qwen2VLCATPBoundingBoxCropper(device=str(self.device))
 
-    def apply(self, example: Dict, retrieval: Dict) -> Dict:
+    def apply(self, query: str, retrieval: Dict) -> Dict:
         text_quotes = list(retrieval.get("selected_text_quotes", []))
-        img_quotes = [dict(q) for q in retrieval.get("selected_img_quotes", [])]
+        img_quotes = list(retrieval.get("selected_img_quotes", []))
 
         pruned_texts = text_quotes
         pruned_images = img_quotes
@@ -129,7 +126,7 @@ class RetrievalPruner:
             visual_before = 0
             visual_after = 0
             for q in img_quotes:
-                new_q, before_i, after_i = self._patch_prune_image(example, q)
+                new_q, before_i, after_i = self._patch_prune_image(query, q)
                 processed.append(new_q)
                 visual_before += before_i
                 visual_after += after_i
@@ -139,7 +136,7 @@ class RetrievalPruner:
             visual_before = 0
             visual_after = 0
             for q in img_quotes:
-                new_q, before_i, after_i = self._catp_prune_image(example, q)
+                new_q, before_i, after_i = self._catp_prune_image(query, q)
                 processed.append(new_q)
                 visual_before += before_i
                 visual_after += after_i
@@ -147,8 +144,6 @@ class RetrievalPruner:
 
         stats = PruningStats(
             mode=self.mode,
-            text_before=len(text_quotes),
-            text_after=len(pruned_texts),
             images_before=len(img_quotes),
             images_after=len(pruned_images),
             visual_tokens_before=visual_before,
@@ -156,6 +151,8 @@ class RetrievalPruner:
         )
 
         return {
+            "tag": retrieval.get("tag"),
+            "tag_hash": retrieval.get("tag_hash"),
             "selected_text_quotes": pruned_texts,
             "selected_img_quotes": pruned_images,
             "pruning": stats.to_dict(),
@@ -174,7 +171,7 @@ class RetrievalPruner:
             return int(meta["tokens_after"])
         return self.patch_grid_rows * self.patch_grid_cols
 
-    def _patch_prune_image(self, example: Dict, q: Dict) -> Tuple[Dict, int, int]:
+    def _patch_prune_image(self, query: str, q: Dict) -> Tuple[Dict, int, int]:
         img_path = q.get("local_img_path")
         before = self.patch_grid_rows * self.patch_grid_cols
         after = before
@@ -190,7 +187,7 @@ class RetrievalPruner:
 
         image = Image.open(img_path).convert("RGB")
         tiles, boxes = self._extract_grid_tiles(image)
-        scores = self._score_tiles(example["question"], tiles)
+        scores = self._score_tiles(query, tiles)
 
         keep_n = max(self.min_visual_tokens, int(len(tiles) * self.keep_ratio))
         keep_n = min(max(1, keep_n), len(tiles))
@@ -202,21 +199,17 @@ class RetrievalPruner:
             "mode": self.mode,
             "tokens_before": before,
             "tokens_after": after,
-            "grid_rows": self.patch_grid_rows,
-            "grid_cols": self.patch_grid_cols,
-            "keep_indices": keep_idx,
-            "keep_boxes": [boxes[i] for i in keep_idx],
-            "scores": [float(scores[i]) for i in keep_idx],
+            "tag_hash": q.get("tag_hash"),
         }
 
         kept_tiles = [tiles[i] for i in keep_idx]
-        pruned_path = self._save_montage(image_path=Path(img_path), kept_tiles=kept_tiles)
+        pruned_path = self._save_montage(image_path=Path(img_path), kept_tiles=kept_tiles, quote=q)
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"]["rendered_image_path"] = str(pruned_path)
 
         return q, before, after
 
-    def _catp_prune_image(self, example: Dict, q: Dict) -> Tuple[Dict, int, int]:
+    def _catp_prune_image(self, query: str, q: Dict) -> Tuple[Dict, int, int]:
         img_path = q.get("local_img_path")
         before = self.patch_grid_rows * self.patch_grid_cols
         after = before
@@ -235,7 +228,7 @@ class RetrievalPruner:
         image = Image.open(image_path).convert("RGB")
         pruned_image, meta = self.catp_cropper.get_pruned_image(
             image=image,
-            query=example["question"],
+            query=query,
             keep_ratio=self.keep_ratio,
         )
 
@@ -245,15 +238,15 @@ class RetrievalPruner:
             image_path=image_path,
             image=pruned_image,
             mode=self.mode,
+            quote=q,
         )
 
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"] = {
             "mode": self.mode,
             **meta,
-            "tokens_before": before,
-            "tokens_after": after,
             "rendered_image_path": str(pruned_path),
+            "tag_hash": q.get("tag_hash"),
         }
         return q, before, after
 
@@ -293,8 +286,29 @@ class RetrievalPruner:
 
             sims = (img_feats @ text_feats.T).squeeze(-1)
         return sims.detach().float().cpu().numpy()
+    
+    def _safe_filename_part(self, value: object, default: str) -> str:
+        text = str(value or default)
+        text = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-._")
+        return text or default
 
-    def _save_montage(self, image_path: Path, kept_tiles: List[Image.Image]) -> Path:
+    def _pruned_output_path(self, image_path: Path, mode: str, quote: Dict | None = None) -> Path:
+        suffix = image_path.suffix or ".jpg"
+        if quote and quote.get("tag_hash"):
+            image_id = self._safe_filename_part(
+                quote.get("image_cache_id") or quote.get("quote_id"),
+                image_path.stem,
+            )
+            tag_hash = self._safe_filename_part(quote.get("tag_hash"), "unknown")
+            out_name = (
+                f"{image_id}_tag-{tag_hash}_pruned_{mode}_"
+                f"{int(self.keep_ratio * 100)}{suffix}"
+            )
+        else:
+            out_name = f"{image_path.stem}_pruned_{mode}_{int(self.keep_ratio * 100)}{suffix}"
+        return self.output_dir / out_name
+
+    def _save_montage(self, image_path: Path, kept_tiles: List[Image.Image], quote: Dict | None = None,) -> Path:
         if not kept_tiles:
             raise ValueError("kept_tiles must not be empty.")
         n = len(kept_tiles)
@@ -309,14 +323,11 @@ class RetrievalPruner:
             y = (idx // cols) * tile_size + (tile_size - thumb.height) // 2
             canvas.paste(thumb, (x, y))
 
-        out_name = f"{image_path.stem}_pruned_{self.mode}_{int(self.keep_ratio * 100)}{image_path.suffix}"
-        out_path = self.output_dir / out_name
+        out_path = self._pruned_output_path(image_path=image_path, mode=self.mode, quote=quote)
         canvas.save(out_path)
         return out_path
 
-    def _save_pruned_image(self, image_path: Path, image: Image.Image, mode: str) -> Path:
-        suffix = image_path.suffix or ".jpg"
-        out_name = f"{image_path.stem}_pruned_{mode}_{int(self.keep_ratio * 100)}{suffix}"
-        out_path = self.output_dir / out_name
+    def _save_pruned_image(self, image_path: Path, image: Image.Image, mode: str, quote: Dict | None = None,) -> Path:
+        out_path = self._pruned_output_path(image_path=image_path, mode=mode, quote=quote)
         image.save(out_path)
         return out_path

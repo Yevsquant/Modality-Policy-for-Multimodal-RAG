@@ -50,6 +50,15 @@ class Qwen2VLCATPBoundingBoxCropper:
 
         return unique_mask
 
+    def _get_prune_stages(self, num_layers: int, num_cuts: int):
+        return np.linspace(0, num_layers - 1, num_cuts + 1, dtype=int)[1:].tolist()
+
+    def _get_keep_ratios(self, final_keep_ratio: float, num_cuts: int):
+        return [
+            final_keep_ratio ** (i / num_cuts)
+            for i in range(1, num_cuts + 1)
+        ]
+
     def get_pruned_image(
         self,
         image: Image.Image,
@@ -81,13 +90,6 @@ class Qwen2VLCATPBoundingBoxCropper:
                 output_attentions=True,
                 output_hidden_states=True,
             )
-            
-            # Get the attention from the final transformer layer
-            # Shape: (batch, num_heads, seq_len, seq_len)
-            last_layer_attn = outputs.attentions[-1]
-            
-            # Average the attention across all heads
-            avg_attn = last_layer_attn.mean(dim=1).squeeze(0) # Shape: (seq_len, seq_len)
 
         # Map Qwen2-VL's Dynamic Grid
         input_ids = inputs.input_ids.squeeze(0)
@@ -116,6 +118,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         )[active_mask]
         if active_image_token_indices.numel() == 0:
             raise ValueError("Diversity pre-filter removed all image tokens.")
+        diversity_keep_indices = current_active_indices.detach().cpu().tolist()
         
         # Find query token idx
         query_ids = self.processor.tokenizer(
@@ -132,23 +135,44 @@ class Qwen2VLCATPBoundingBoxCropper:
         query_start_idx = find_subsequence(input_ids, query_ids)
         if query_start_idx == -1:
             raise ValueError("Could not find query tokens in input_ids.")
-        
-        # 4. Execute Contextual Importance Scoring (CATP)
-        # We want the attention from the text query tokens to the image patch tokens
-        # Shape: (num_query_tokens, num_active_image_tokens)
-        query_to_image_attn = avg_attn[query_start_idx:, active_image_token_indices]
-        
-        # Average the attention to find the most globally important patches for this query
-        patch_importance = query_to_image_attn.mean(dim=0) # Shape: (num_active_image_tokens,)
 
-        # Identify Top K Patches
-        k = max(1, int(num_image_tokens * keep_ratio))
-        k = min(k, int(active_image_token_indices.numel()))
-        top_k = torch.topk(patch_importance, k)
-        top_k_indices = current_active_indices[top_k.indices].detach().cpu().numpy()
-        top_k_scores = top_k.values.detach().float().cpu().tolist()
+        # 4. Execute progressive contextual pruning across transformer depth.
+        num_cuts = 3
+        num_layers = len(outputs.attentions)
+        prune_stages = self._get_prune_stages(num_layers, num_cuts)
+        keep_ratios = self._get_keep_ratios(keep_ratio, num_cuts)
+        progressive_stages = []
+        final_scores = None
 
-        # Translate 1D Tokens back to 2D Bounding Box
+        for layer_idx, target_ratio in zip(prune_stages, keep_ratios):
+            layer_attn = outputs.attentions[layer_idx].mean(dim=1).squeeze(0)
+            active_global_indices = image_token_indices[current_active_indices]
+            query_to_image_attn = layer_attn[query_start_idx:, active_global_indices]
+            patch_importance = query_to_image_attn.mean(dim=0)
+
+            tokens_before_stage = int(current_active_indices.numel())
+            k = max(1, int(num_image_tokens * target_ratio))
+            k = min(k, tokens_before_stage)
+
+            top_k = torch.topk(patch_importance, k)
+            current_active_indices = current_active_indices[top_k.indices]
+            final_scores = top_k.values.detach().float().cpu().tolist()
+
+            progressive_stages.append({
+                "layer_idx": int(layer_idx),
+                "target_ratio": float(target_ratio),
+                "tokens_before": tokens_before_stage,
+                "tokens_after": int(current_active_indices.numel()),
+                "keep_indices": [
+                    int(i) for i in current_active_indices.detach().cpu().tolist()
+                ],
+            })
+
+        top_k_indices = current_active_indices.detach().cpu().numpy()
+        top_k_scores = final_scores or []
+        k = int(current_active_indices.numel())
+
+        # Translate 1D Tokens back to 2D document-grid coordinates.
         # Qwen2-VL flattens the grid row-by-row
         merged_grid_w = grid_w // merge_size
         merged_grid_h = grid_h // merge_size
@@ -173,17 +197,143 @@ class Qwen2VLCATPBoundingBoxCropper:
         x_min, y_min = max(0, x_min), max(0, y_min)
         x_max, y_max = min(width, x_max), min(height, y_max)
         
-        # 7. Physical Safe Crop
-        cropped_image = image.crop((x_min, y_min, x_max, y_max))
+        stitched_image, stitching_meta = self._axis_aligned_strip_stitch(
+            image=image,
+            patch_indices=top_k_indices,
+            patch_scores=top_k_scores,
+            grid_h=int(merged_grid_h),
+            grid_w=int(merged_grid_w),
+        )
 
         metadata = {
             "tokens_before": num_image_tokens,
             "tokens_after": k,
             "tokens_before_diversity": int(image_token_indices.numel()),
             "tokens_after_diversity": int(active_image_token_indices.numel()),
+            "document_stitching": stitching_meta,
         }
 
-        return cropped_image, metadata
+        return stitched_image, metadata
+
+    def _axis_aligned_strip_stitch(
+        self,
+        image: Image.Image,
+        patch_indices,
+        patch_scores,
+        grid_h: int,
+        grid_w: int,
+    ) -> Tuple[Image.Image, Dict[str, Any]]:
+        """
+        Collapse low-attention horizontal bands for document-like images.
+
+        CATP provides query-conditioned patch scores; this method sums those
+        scores by row, removes rows under a row-attention threshold, and stitches
+        the remaining full-width horizontal strips in their original order.
+        """
+        width, height = image.size
+        patch_indices = np.asarray(patch_indices, dtype=np.int64)
+        patch_scores = np.asarray(patch_scores, dtype=np.float32)
+        if patch_scores.size != patch_indices.size:
+            patch_scores = np.ones(patch_indices.size, dtype=np.float32)
+
+        patch_y = patch_indices // grid_w
+        row_scores = np.zeros(grid_h, dtype=np.float32)
+        for row, score in zip(patch_y, patch_scores):
+            row_scores[int(row)] += float(score)
+
+        active_rows = np.unique(patch_y).astype(np.int64)
+        kept_rows, threshold, used_fallback = self._select_document_rows(
+            row_scores=row_scores,
+            active_rows=active_rows,
+        )
+
+        row_edges = np.linspace(0, height, grid_h + 1, dtype=int)
+        strip_ranges = self._contiguous_ranges(kept_rows)
+        strip_boxes = [
+            (0, int(row_edges[start]), width, int(row_edges[end + 1]))
+            for start, end in strip_ranges
+            if int(row_edges[end + 1]) > int(row_edges[start])
+        ]
+        stitched = self._stitch_horizontal_strips(image, strip_boxes)
+
+        kept_set = set(int(row) for row in kept_rows.tolist())
+        dead_rows = np.asarray(
+            [row for row in range(grid_h) if row not in kept_set],
+            dtype=np.int64,
+        )
+        dead_bands = self._contiguous_ranges(dead_rows)
+
+        metadata = {
+            "method": "axis_aligned_strip_stitching",
+            "grid_h": int(grid_h),
+            "grid_w": int(grid_w),
+            "row_attention_threshold": float(threshold),
+            "threshold_fallback": bool(used_fallback),
+            "original_size": [int(width), int(height)],
+            "stitched_size": [int(stitched.width), int(stitched.height)],
+        }
+        return stitched, metadata
+
+    def _select_document_rows(
+        self,
+        row_scores: np.ndarray,
+        active_rows: np.ndarray,
+    ) -> Tuple[np.ndarray, float, bool]:
+        if active_rows.size == 0:
+            return np.arange(row_scores.size, dtype=np.int64), 0.0, True
+
+        positive_scores = row_scores[row_scores > 0]
+        if positive_scores.size == 0:
+            return np.sort(active_rows), 0.0, True
+
+        threshold = float(positive_scores.mean() * 0.5)
+        kept_rows = np.flatnonzero(row_scores >= threshold).astype(np.int64)
+
+        if kept_rows.size == 0:
+            return np.sort(active_rows), threshold, True
+
+        return kept_rows, threshold, False
+
+    def _contiguous_ranges(self, indices: np.ndarray):
+        if indices.size == 0:
+            return []
+
+        sorted_indices = np.sort(indices.astype(np.int64))
+        ranges = []
+        start = int(sorted_indices[0])
+        prev = start
+
+        for value in sorted_indices[1:].tolist():
+            value = int(value)
+            if value == prev + 1:
+                prev = value
+                continue
+            ranges.append((start, prev))
+            start = value
+            prev = value
+
+        ranges.append((start, prev))
+        return ranges
+
+    def _stitch_horizontal_strips(
+        self,
+        image: Image.Image,
+        strip_boxes,
+    ) -> Image.Image:
+        if not strip_boxes:
+            return image.copy()
+
+        width = image.width
+        out_height = max(1, sum(y1 - y0 for _, y0, _, y1 in strip_boxes))
+        stitched = Image.new("RGB", (width, out_height), color=(255, 255, 255))
+
+        y_out = 0
+        for box in strip_boxes:
+            strip = image.crop(box)
+            stitched.paste(strip, (0, y_out))
+            y_out += strip.height
+
+        return stitched
 
     def get_pruned_image_base64(self, image: Image.Image, query: str, keep_ratio: float = 0.3) -> str:
         """

@@ -208,21 +208,6 @@ class Qwen2VLCATPBoundingBoxCropper:
             "tokens_after": k,
             "tokens_before_diversity": int(image_token_indices.numel()),
             "tokens_after_diversity": int(active_image_token_indices.numel()),
-            "progressive_pruning_cuts": num_cuts,
-            "progressive_pruning_stages": progressive_stages,
-            "qwen_grid_thw": [int(grid_t), int(grid_h), int(grid_w)],
-            "merged_grid_h": int(merged_grid_h),
-            "merged_grid_w": int(merged_grid_w),
-            "merge_size": int(merge_size),
-            "diversity_keep_indices": [
-                int(i) for i in diversity_keep_indices
-            ],
-            "keep_indices": [int(i) for i in top_k_indices.tolist()],
-            "keep_grid_xy": [
-                [int(x), int(y)] for x, y in zip(patch_x.tolist(), patch_y.tolist())
-            ],
-            "scores": [float(score) for score in top_k_scores],
-            "crop_box": [int(x_min), int(y_min), int(x_max), int(y_max)],
             "document_slicing": slicing_meta,
         }
 
@@ -288,12 +273,6 @@ class Qwen2VLCATPBoundingBoxCropper:
             "col_threshold": float(col_threshold),
             "row_threshold_fallback": bool(row_fallback),
             "col_threshold_fallback": bool(col_fallback),
-            "kept_rows": [int(i) for i in kept_rows.tolist()],
-            "kept_cols": [int(i) for i in kept_cols.tolist()],
-            "deleted_rows": [int(i) for i in deleted_rows],
-            "deleted_cols": [int(i) for i in deleted_cols],
-            "row_scores": [float(score) for score in row_scores.tolist()],
-            "col_scores": [float(score) for score in col_scores.tolist()],
             "original_size": [int(width), int(height)],
             "stitched_size": [int(stitched.width), int(stitched.height)],
         }

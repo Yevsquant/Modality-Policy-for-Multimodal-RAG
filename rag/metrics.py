@@ -111,7 +111,7 @@ def llm_judge(
     question: str,
     gold_answer: str,
     pred_answer: str,
-    evidence: str,
+    evidence: str = "",
 ) -> Dict:
     prompt = JUDGE_PROMPT.format(
         question=question,
