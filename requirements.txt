@@ -1,4 +1,7 @@
-vllm==0.19.0
+# vllm<0.20 pins transformers<5, which conflicts with GPTQModel>=6 (needs transformers>=5.4).
+# Pin transformers to a 5.6.x release compatible with vllm 0.20, GPTQModel 6.x, and sentence-transformers 5.4.x.
+transformers==5.6.2
+vllm==0.20.0
 lmcache==0.4.3
 nvidia-cuda-cupti==13.0.85
 nvidia-cuda-nvrtc==13.0.88

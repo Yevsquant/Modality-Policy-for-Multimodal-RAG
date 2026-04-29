@@ -137,8 +137,8 @@ class Qwen2VLCATPBoundingBoxCropper:
             raise ValueError("Could not find query tokens in input_ids.")
 
         # 4. Execute progressive contextual pruning across transformer depth.
-        num_cuts = 3
         num_layers = len(outputs.attentions)
+        num_cuts = min(3, num_layers-1)
         prune_stages = self._get_prune_stages(num_layers, num_cuts)
         keep_ratios = self._get_keep_ratios(keep_ratio, num_cuts)
         progressive_stages = []
