@@ -151,8 +151,6 @@ class RetrievalPruner:
         )
 
         return {
-            "tag": retrieval.get("tag"),
-            "tag_hash": retrieval.get("tag_hash"),
             "selected_text_quotes": pruned_texts,
             "selected_img_quotes": pruned_images,
             "pruning": stats.to_dict(),
@@ -215,8 +213,6 @@ class RetrievalPruner:
         after = before
         if not img_path or not Path(img_path).exists():
             q["visual_pruning"] = {
-                "mode": self.mode,
-                "skipped": True,
                 "reason": "missing_image",
                 "tokens_before": before,
                 "tokens_after": after,
@@ -243,10 +239,7 @@ class RetrievalPruner:
 
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"] = {
-            "mode": self.mode,
             **meta,
-            "rendered_image_path": str(pruned_path),
-            "tag_hash": q.get("tag_hash"),
         }
         return q, before, after
 

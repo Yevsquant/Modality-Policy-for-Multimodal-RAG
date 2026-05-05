@@ -6,7 +6,7 @@ from openai import OpenAI
 from rag.config import RAGConfig
 from rag.mmdocrag_dataset import load_examples
 from rag.metrics import aggregate_summary, build_evidence_text, lexical_metrics, llm_judge, retrieval_recall
-from rag.query_pipeline import MMDocRAGPipeline
+from rag.query_pipeline import RAGPipeline
 from rag.vqa_metrics import vqa_accuracy
 from rag.vqav2_dataset import load_vqav2_examples
 
@@ -29,7 +29,7 @@ def run_baseline(cfg: RAGConfig):
     else:
         raise ValueError(f"Unknown benchmark: {cfg.benchmark!r}")
 
-    pipe = MMDocRAGPipeline(cfg)
+    pipe = RAGPipeline(cfg)
 
     rows = []
     for i, ex in enumerate(examples, start=1):

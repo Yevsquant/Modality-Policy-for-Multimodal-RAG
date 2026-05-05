@@ -1,139 +1,10 @@
 from rag.config import RAGConfig
 from rag.eval_baseline import run_baseline, run_offline_judge
-import requests
-from typing import Dict
-import os
+from rag.vllm_metrics import scrape_prometheus_metrics
 import psutil
 from pathlib import Path
 import json
 
-
-def _merge_lines_into_metrics(
-    lines: list[str],
-    alias_to_canonical: dict[str, str],
-    lmcache_only: bool,
-) -> tuple[Dict[str, float], int]:
-    out: Dict[str, float] = {}
-    parse_errors = 0
-    lmcache_keys = {k for k in alias_to_canonical.values() if k.startswith("lmcache:")}
-    for line in lines:
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        metric_name = parts[0].split("{")[0]
-        canonical_name = alias_to_canonical.get(metric_name)
-        if canonical_name is None:
-            continue
-        if lmcache_only and canonical_name not in lmcache_keys:
-            continue
-        try:
-            out[canonical_name] = float(parts[-1])
-        except ValueError:
-            parse_errors += 1
-    return out, parse_errors
-
-
-def scrape_prometheus_metrics(metrics_url: str = "http://127.0.0.1:8000/metrics") -> Dict[str, float]:
-    """
-    Scrape selected counters and gauges from a Prometheus text endpoint.
-
-    **Model tokens processed (vLLM):** ``vllm:prompt_tokens_total`` plus
-    ``vllm:generation_tokens_total`` are the cumulative prompt and generated
-    token counters. ``vllm:prompt_tokens_cached`` / ``vllm:prompt_tokens_recomputed``
-    and ``vllm:kv_cache_usage_perc`` add KV-cache detail.
-
-    **LMCache:** usage bytes (``lmcache:local_cache_usage``,
-    ``lmcache:remote_cache_usage``, ``lmcache:local_storage_usage``), hit rates,
-    and request/token counters are merged when present on ``metrics_url``. If
-    ``curl …/metrics`` has no ``lmcache:`` lines (common when multiprocess
-    exposition is split), set env ``LMCACHE_METRICS_URL`` to the full URL of the
-    endpoint that exposes LMCache series; those keys are merged into the same
-    dict.
-    """
-    wanted = {
-        "vllm:kv_cache_usage_perc": ["vllm:kv_cache_usage_perc"],
-        "vllm:prompt_tokens_cached": [
-            "vllm:prompt_tokens_cached",
-            "vllm:prompt_tokens_cached_total",
-        ],
-        "vllm:prompt_tokens_recomputed": [
-            "vllm:prompt_tokens_recomputed",
-            "vllm:prompt_tokens_recomputed_total",
-        ],
-        "vllm:prompt_tokens_total": [
-            "vllm:prompt_tokens_total",
-            "vllm:prompt_tokens",
-        ],
-        "vllm:generation_tokens_total": [
-            "vllm:generation_tokens_total",
-            "vllm:generation_tokens",
-        ],
-        "lmcache:local_cache_usage": ["lmcache:local_cache_usage"],
-        "lmcache:remote_cache_usage": ["lmcache:remote_cache_usage"],
-        "lmcache:local_storage_usage": ["lmcache:local_storage_usage"],
-        "lmcache:retrieve_hit_rate": ["lmcache:retrieve_hit_rate"],
-        "lmcache:lookup_hit_rate": ["lmcache:lookup_hit_rate"],
-        "lmcache:num_requested_tokens": [
-            "lmcache:num_requested_tokens",
-            "lmcache:num_requested_tokens_total",
-        ],
-        "lmcache:num_hit_tokens": [
-            "lmcache:num_hit_tokens",
-            "lmcache:num_hit_tokens_total",
-        ],
-        "lmcache:num_stored_tokens": [
-            "lmcache:num_stored_tokens",
-            "lmcache:num_stored_tokens_total",
-        ],
-        "lmcache:num_retrieve_requests": [
-            "lmcache:num_retrieve_requests",
-            "lmcache:num_retrieve_requests_total",
-        ],
-        "lmcache:num_store_requests": [
-            "lmcache:num_store_requests",
-            "lmcache:num_store_requests_total",
-        ],
-        "lmcache:num_lookup_requests": [
-            "lmcache:num_lookup_requests",
-            "lmcache:num_lookup_requests_total",
-        ],
-        "lmcache:num_lookup_tokens": [
-            "lmcache:num_lookup_tokens",
-            "lmcache:num_lookup_tokens_total",
-        ],
-        "lmcache:num_lookup_hits": [
-            "lmcache:num_lookup_hits",
-            "lmcache:num_lookup_hits_total",
-        ],
-        "lmcache:num_vllm_hit_tokens": [
-            "lmcache:num_vllm_hit_tokens",
-            "lmcache:num_vllm_hit_tokens_total",
-        ],
-    }
-    alias_to_canonical = {
-        alias: canonical
-        for canonical, aliases in wanted.items()
-        for alias in aliases
-    }
-
-    response = requests.get(metrics_url, timeout=5)
-    lines = response.text.splitlines()
-    out, _ = _merge_lines_into_metrics(lines, alias_to_canonical, lmcache_only=False)
-
-    extra = os.getenv("LMCACHE_METRICS_URL", "").strip()
-    if extra:
-        try:
-            r2 = requests.get(extra, timeout=5)
-            lmcache_out, _ = _merge_lines_into_metrics(
-                r2.text.splitlines(), alias_to_canonical, lmcache_only=True
-            )
-            out.update(lmcache_out)
-        except Exception:
-            pass
-
-    return out
 
 def get_host_memory_stats():
     vm = psutil.virtual_memory()
@@ -155,13 +26,13 @@ def get_dir_size_gb(path: str):
     return total / (1024**3)
 
 
-def _lmcache_prometheus_subset(metrics: Dict[str, float]) -> Dict[str, float]:
+def _lmcache_prometheus_subset(metrics: dict[str, float]) -> dict[str, float]:
     return {k: v for k, v in metrics.items() if k.startswith("lmcache:")}
 
 
 def build_lmcache_payload(
-    metrics_before: Dict[str, float],
-    metrics_after: Dict[str, float],
+    metrics_before: dict[str, float],
+    metrics_after: dict[str, float],
     dir_size_before_gb: float,
     dir_size_after_gb: float,
 ) -> dict:

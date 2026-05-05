@@ -18,13 +18,13 @@ class RAGConfig:
     # pruning baselines
     pruning_keep_ratio: float = 0.30
     # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "catp_pruning"}
-    pruning_mode: str = "no_pruning" 
+    pruning_mode: str = "catp_pruning" 
     patch_grid_rows: int = 4
     patch_grid_cols: int = 4
     min_visual_tokens: int = 4
     montage_tile_size: int = 224
     pruned_image_dir: Path = Path("data/mmdocrag/outputs/pruned_images")
-    image_prune_cache_enabled: bool = False
+    image_prune_cache_enabled: bool = True
     image_prune_cache_similarity_threshold: float = 0.85
     image_prune_cache_path: Path = Path("data/mmdocrag/outputs/image_prune_cache.json")
 
@@ -38,7 +38,7 @@ class RAGConfig:
     judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
     # eval (None = use entire split / JSONL / official VQA file)
-    max_examples: int | None = 100
+    max_examples: int | None = 500
 
     # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
     benchmark: str = "mmdocrag"

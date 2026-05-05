@@ -37,7 +37,7 @@ class CachedPrunedImage:
         self.tag_hash = tag_hash
         self.pruned_img_path = pruned_img_path
 
-class MMDocRAGPipeline:
+class RAGPipeline:
     def __init__(self, cfg: RAGConfig):
         self.cfg = cfg
         self.image_prune_cache_path = self._image_prune_cache_path()
@@ -101,29 +101,21 @@ class MMDocRAGPipeline:
         return str(quote_id or "")
 
     def _with_tag_hash(self, retrieval: Dict) -> Dict:
-        tags = retrieval.get("tag") or []
-        if self._is_vector_tag(tags):
-            tags = [tags]
-        if not isinstance(tags, list):
-            tags = []
         selected_images = []
         tag_hashes = []
         for idx, q in enumerate(retrieval.get("selected_img_quotes", [])):
-            tag = tags[idx] if idx < len(tags) and self._is_vector_tag(tags[idx]) else []
+            tag = q["tag"] if self._is_vector_tag(q["tag"]) else []
             tag_hash = self._tag_hash(tag) if tag else ""
             tag_hashes.append(tag_hash)
             selected_images.append(
                 {
                     **q,
-                    "retrieval_tag": tag,
                     "tag_hash": tag_hash,
                     "image_cache_id": self._image_cache_id(q),
                 }
             )
         return {
             **retrieval,
-            "tag": tags,
-            "tag_hash": tag_hashes,
             "selected_img_quotes": selected_images,
         }
 
@@ -198,7 +190,7 @@ class MMDocRAGPipeline:
         cached_images = []
         for q in retrieval.get("selected_img_quotes", []):
             image_id = q.get("image_cache_id") or self._image_cache_id(q)
-            tag = q.get("retrieval_tag") or []
+            tag = q.get("tag") or []
             entries = self.image_prune_cache.get(image_id, [])
             if not tag or not image_id or not entries:
                 stats["image_prune_cache_misses"] += 1
@@ -221,11 +213,7 @@ class MMDocRAGPipeline:
                 **q,
                 "local_img_path": best_entry.pruned_img_path,
                 "tag_hash": best_entry.tag_hash,
-                "image_prune_cache": {
-                    "hit": True,
-                    "similarity": float(best_similarity),
-                    "image_cache_id": image_id,
-                },
+                "cache_similarity": float(best_similarity),
             }
             cached_images.append(cached_q)
             stats["image_prune_cache_hits"] += 1
@@ -242,7 +230,7 @@ class MMDocRAGPipeline:
         for q in pruned_img_quotes:
             image_id = q.get("image_cache_id") or self._image_cache_id(q)
             pruned_img_path = q.get("local_img_path")
-            tag = q.get("retrieval_tag") or []
+            tag = q.get("tag") or []
             tag_hash = q.get("tag_hash") or ""
             if (
                 not image_id
@@ -354,9 +342,10 @@ class MMDocRAGPipeline:
             new_q = dict()
             new_q["image_cache_id"] = q["image_cache_id"]
             new_q["tag_hash"] = q["tag_hash"]
-            new_q["pruning_mode"] = q["visual_pruning"]["mode"]
-            new_q["tokens_before"] = q["visual_pruning"]["tokens_before"]
-            new_q["tokens_after"] = q["visual_pruning"]["tokens_after"]
+            q_pruning = q.get("visual_pruning")
+            new_q["pruning_mode"] = self.cfg.pruning_mode
+            new_q["tokens_before"] = q_pruning.get("tokens_before", -1) if q_pruning else -1
+            new_q["tokens_after"] = q_pruning.get("tokens_after", -1) if q_pruning else -1
             returned_selected_img_quotes.append(new_q)
         for q in cached_img_quotes:
             new_q = dict()
@@ -368,7 +357,7 @@ class MMDocRAGPipeline:
             returned_selected_img_quotes.append(new_q)
 
         return {
-            "q_id": example["q_id"],
+            "q_id": example["q_id"], # query id
             "question": example["question"],
             "gold_answer": example["answer_short"],
             "pred_answer": pred,
@@ -376,7 +365,7 @@ class MMDocRAGPipeline:
             "retrieved_quote_ids": retrieved_ids,
             "selected_text_quotes": pruned_retrieval["selected_text_quotes"],
             "selected_img_quotes": returned_selected_img_quotes,
-            **cache_stats,
+            # **cache_stats,
             "pruning": pruned_retrieval["pruning"],
             "timing": {
                 "retrieval_sec": t1 - t0,

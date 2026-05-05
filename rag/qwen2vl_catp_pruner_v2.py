@@ -199,10 +199,13 @@ class Qwen2VLCATPBoundingBoxCropper:
         
         # 7. Physical Safe Crop
         cropped_image = image.crop((x_min, y_min, x_max, y_max))
+        bbox_grid_w = max_grid_x - min_grid_x + 1
+        bbox_grid_h = max_grid_y - min_grid_y + 1
+        true_tokens_after = int(bbox_grid_w * bbox_grid_h)
 
         metadata = {
             "tokens_before": num_image_tokens,
-            "tokens_after": k,
+            "tokens_after": true_tokens_after,
             "tokens_before_diversity": int(image_token_indices.numel()),
             "tokens_after_diversity": int(active_image_token_indices.numel()),
         }
