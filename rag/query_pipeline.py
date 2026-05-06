@@ -359,7 +359,7 @@ class RAGPipeline:
         return {
             "q_id": example["q_id"], # query id
             "question": example["question"],
-            "gold_answer": example["answer_short"],
+            "gold_answer": example["answer"],
             "pred_answer": pred,
             "gold_quotes": example["gold_quotes"],
             "retrieved_quote_ids": retrieved_ids,

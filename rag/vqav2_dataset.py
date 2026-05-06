@@ -57,7 +57,7 @@ def _build_vqa_example_dict(
         "text_quotes": [],
         "img_quotes": img_quotes,
         "gold_quotes": ["image1"],
-        "answer_short": answer_short,
+        "answer": answer_short,
         "vqa_answers": answers,
     }
 

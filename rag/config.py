@@ -38,7 +38,7 @@ class RAGConfig:
     judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
     # eval (None = use entire split / JSONL / official VQA file)
-    max_examples: int | None = 500
+    max_examples: int | None = 30
 
     # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
     benchmark: str = "mmdocrag"

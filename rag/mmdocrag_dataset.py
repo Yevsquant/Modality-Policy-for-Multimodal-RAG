@@ -29,7 +29,7 @@ def normalize_example(ex: Dict, images_root: Path) -> Dict:
         "text_quotes": text_quotes,
         "img_quotes": img_quotes,
         "gold_quotes": ex.get("gold_quotes", []),
-        "answer_short": ex.get("answer_short", ""),
+        "answer": ex.get("answer", ""),
     }
 
 def load_examples(ann_file: Path, images_root: Path, limit: int | None = None) -> List[Dict]:

@@ -5,7 +5,7 @@ from openai import OpenAI
 
 from rag.config import RAGConfig
 from rag.mmdocrag_dataset import load_examples
-from rag.metrics import aggregate_summary, build_evidence_text, lexical_metrics, llm_judge, retrieval_recall
+from rag.metrics import aggregate_summary, lexical_metrics, llm_judge, retrieval_recall
 from rag.query_pipeline import RAGPipeline
 from rag.vqa_metrics import vqa_accuracy
 from rag.vqav2_dataset import load_vqav2_examples
@@ -88,31 +88,25 @@ def run_offline_judge(cfg: RAGConfig, predictions_file: Path | None = None):
     judge_client = OpenAI(base_url=cfg.judge_api_base, api_key="EMPTY")
 
     for i, row in enumerate(rows, start=1):
-        evidence = "" # build_evidence_text(row) # KEEP THIS COMMENTED
+        evidence = ""
         judge = llm_judge(
             client=judge_client,
             judge_model=cfg.judge_model_name,
             question=row["question"],
             gold_answer=row["gold_answer"],
             pred_answer=row["pred_answer"],
-            evidence=evidence,
         )
         row.setdefault("metrics", {})
         row["metrics"].update({
             "judge_correct": judge["correct"],
             "judge_score": judge["score"],
-            "judge_faithful": judge["faithful"],
-            "judge_faithfulness_score": judge["faithfulness_score"],
         })
         row["judge"] = judge
-        row["evidence_text"] = evidence
 
         print(
             f"[judge {i}/{len(rows)}] "
             f"Correct={judge['correct']} "
             f"C-Score={judge['score']} "
-            f"Faithful={judge['faithful']} "
-            f"F-Score={judge['faithfulness_score']}"
         )
     summary = aggregate_summary(rows)
     summary["benchmark"] = benchmark

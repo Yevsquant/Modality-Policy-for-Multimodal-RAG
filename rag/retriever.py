@@ -132,9 +132,11 @@ class QuoteRetriever:
 
             if len(valid_idx) > 0 and len(img_embs) > 0:
                 local_topk = self._topk(query_img_emb, img_embs, min(image_top_k, len(valid_idx)))
-                selected_images = [img_quotes[valid_idx[i]] for i in local_topk]
+                selected_images = []
                 for i in local_topk:
-                    selected_images[i]["tag"] = self._image_conditioned_clip_tag(query_img_emb, img_embs[i])
+                    item = dict(img_quotes[valid_idx[i]])
+                    item["tag"] = self._image_conditioned_clip_tag(query_img_emb, img_embs[i])
+                    selected_images.append(item)
 
         return {
             "selected_text_quotes": selected_texts,
