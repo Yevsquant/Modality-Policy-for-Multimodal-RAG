@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import re
+import copy
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -9,9 +11,90 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import CLIPModel, CLIPProcessor
+import pandas as pd
+import matplotlib.pyplot as plt
 
 from rag.retriever import _clip_features_to_tensor
 
+# def draw_plot(layer_metrics, image_cache_id, tag_hash):
+#     df = pd.DataFrame(layer_metrics)
+
+#     plt.figure()
+#     plt.plot(df["layer_idx"], df["query_to_image_attention_mean"], marker="o")
+#     plt.xlabel("Layer")
+#     plt.ylabel("Mean Query-to-Image Attention")
+#     plt.title("Query-to-Image Attention vs Layer")
+#     plt.grid(True)
+#     plt.savefig("query_to_image_attention.png", bbox_inches="tight")
+#     plt.close()
+
+#     plt.figure()
+#     plt.plot(df["layer_idx"], df["topk_mass_ratio"], marker="o")
+#     plt.xlabel("Layer")
+#     plt.ylabel("Top-k Attention Mass Ratio")
+#     plt.title("Top-k Attention Concentration vs Layer")
+#     plt.grid(True)
+#     plt.savefig("topk_attention_concentration.png", bbox_inches="tight")
+#     plt.close()
+
+#     plt.figure()
+#     plt.plot(df["layer_idx"], df["attention_entropy"], marker="o")
+#     plt.xlabel("Layer")
+#     plt.ylabel("Attention Entropy")
+#     plt.title("Attention Entropy vs Layer")
+#     plt.grid(True)
+#     plt.savefig("attention_entropy.png", bbox_inches="tight")
+#     plt.close()
+
+#     plt.figure()
+#     plt.plot(df["layer_idx"], df["topk_overlap_with_prev_layer"], marker="o")
+#     plt.xlabel("Layer")
+#     plt.ylabel("Top-k Overlap with Previous Layer")
+#     plt.title("Token Ranking Stability vs Layer")
+#     plt.grid(True)
+#     plt.savefig("token_ranking_stability.png", bbox_inches="tight")
+#     plt.close()
+
+def draw_plot(layer_metrics, icd, th):
+    df = pd.DataFrame(layer_metrics)
+
+    # Create a single figure with a 2x2 grid of subplots
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Top-Left: Query-to-Image Attention
+    axs[0, 0].plot(df["layer_idx"], df["query_to_image_attention_mean"], marker="o")
+    axs[0, 0].set_xlabel("Layer")
+    axs[0, 0].set_ylabel("Mean Query-to-Image Attention")
+    axs[0, 0].set_title("Query-to-Image Attention vs Layer")
+    axs[0, 0].grid(True)
+
+    # Top-Right: Top-k Attention Concentration
+    axs[0, 1].plot(df["layer_idx"], df["topk_mass_ratio"], marker="o")
+    axs[0, 1].set_xlabel("Layer")
+    axs[0, 1].set_ylabel("Top-k Attention Mass Ratio")
+    axs[0, 1].set_title("Top-k Attention Concentration vs Layer")
+    axs[0, 1].grid(True)
+
+    # Bottom-Left: Attention Entropy
+    axs[1, 0].plot(df["layer_idx"], df["attention_entropy"], marker="o")
+    axs[1, 0].set_xlabel("Layer")
+    axs[1, 0].set_ylabel("Attention Entropy")
+    axs[1, 0].set_title("Attention Entropy vs Layer")
+    axs[1, 0].grid(True)
+
+    # Bottom-Right: Token Ranking Stability
+    axs[1, 1].plot(df["layer_idx"], df["topk_overlap_with_prev_layer"], marker="o")
+    axs[1, 1].set_xlabel("Layer")
+    axs[1, 1].set_ylabel("Top-k Overlap with Previous Layer")
+    axs[1, 1].set_title("Token Ranking Stability vs Layer")
+    axs[1, 1].grid(True)
+
+    # Automatically adjust spacing to prevent labels from overlapping
+    plt.tight_layout()
+
+    # Save the single combined image
+    plt.savefig(f"data/mmdocrag/analysis/{icd}_{th}_layer_metrics.png", bbox_inches="tight")
+    plt.close()
 
 @dataclass(frozen=True)
 class PruningStats:
@@ -60,6 +143,7 @@ class RetrievalPruner:
         self,
         mode: str = "no_pruning",
         keep_ratio: float = 0.5,
+        percentile_ratio: float = 0.5,
         image_model_name: str | None = None,
         device: str = "cuda",
         patch_grid_rows: int = 4,
@@ -67,6 +151,7 @@ class RetrievalPruner:
         min_visual_tokens: int = 4,
         montage_tile_size: int = 224,
         output_dir: str | Path = "data/mmdocrag/outputs/pruned_images",
+        analysis_file: str | Path = "data/mmdocrag/analysis/layer_metrics_data.jsonl",
     ):
         if mode not in self.SUPPORTED_MODES:
             raise ValueError(
@@ -80,12 +165,14 @@ class RetrievalPruner:
 
         self.mode = mode
         self.keep_ratio = keep_ratio
+        self.percentile_ratio = percentile_ratio
         self.patch_grid_rows = patch_grid_rows
         self.patch_grid_cols = patch_grid_cols
         self.min_visual_tokens = min_visual_tokens
         self.montage_tile_size = montage_tile_size
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.analysis_file = analysis_file
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.image_model_name = image_model_name
@@ -113,7 +200,6 @@ class RetrievalPruner:
         pruned_images = img_quotes
         visual_before = sum(self._estimate_visual_tokens(q) for q in img_quotes)
         visual_after = visual_before
-
         if self.mode == "uniform_pruning":
             pruned_texts = self._prune_list(text_quotes)
             pruned_images = self._prune_list(img_quotes)
@@ -136,8 +222,12 @@ class RetrievalPruner:
             visual_before = 0
             visual_after = 0
             for q in img_quotes:
-                new_q, before_i, after_i = self._catp_prune_image(query, q)
+                new_q, before_i, after_i, layer_metrics = self._catp_prune_image(query, q)
                 processed.append(new_q)
+                if layer_metrics is not None:
+                    with open(self.analysis_file, 'a') as jsonl_file:
+                        json_string = json.dumps(layer_metrics)
+                        jsonl_file.write(json_string + '\n')
                 visual_before += before_i
                 visual_after += after_i
             pruned_images = processed
@@ -226,6 +316,9 @@ class RetrievalPruner:
             image=image,
             query=query,
             keep_ratio=self.keep_ratio,
+            percentile_ratio = self.percentile_ratio,
+            image_cache_id = q.get("image_cache_id"),
+            tag_hash = q.get("tag_hash"),
         )
 
         before = int(meta.get("tokens_before", before))
@@ -239,9 +332,15 @@ class RetrievalPruner:
 
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"] = {
-            **meta,
+            "tokens_before": meta["tokens_before"],
+            "tokens_after": meta["tokens_after"],
+            "tokens_before_diversity": meta["tokens_before_diversity"],
+            "tokens_after_diversity": meta["tokens_after_diversity"],
         }
-        return q, before, after
+        # (dev)
+        # draw_plot(meta["layer_metrics"], q["image_cache_id"], q["tag_hash"])
+
+        return q, before, after, meta["layer_metrics"]
 
     def _extract_grid_tiles(self, image: Image.Image) -> Tuple[List[Image.Image], List[List[int]]]:
         width, height = image.size

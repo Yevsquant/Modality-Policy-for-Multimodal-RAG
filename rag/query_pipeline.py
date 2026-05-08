@@ -52,6 +52,7 @@ class RAGPipeline:
         self.pruner = RetrievalPruner(
             mode=cfg.pruning_mode,
             keep_ratio=cfg.pruning_keep_ratio,
+            percentile_ratio = cfg.pruning_percentile_ratio,
             image_model_name=cfg.image_embedding_model,
             device=cfg.retrieval_device,
             patch_grid_rows=cfg.patch_grid_rows,
