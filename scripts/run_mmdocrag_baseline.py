@@ -1,9 +1,15 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import psutil
+
 from rag.config import RAGConfig
 from rag.eval_baseline import run_baseline, run_offline_judge
 from rag.vllm_metrics import scrape_prometheus_metrics
-import psutil
-from pathlib import Path
-import json
 
 
 def get_host_memory_stats():
@@ -52,8 +58,47 @@ def build_lmcache_payload(
     }
 
 
+def _parse_args() -> argparse.Namespace:
+    defaults = RAGConfig()
+    p = argparse.ArgumentParser(description="MMDocRAG baseline eval with LMCache metrics.")
+    p.add_argument(
+        "--eval-slice-start",
+        type=int,
+        default=None,
+        metavar="I",
+        help=f"First JSONL line index (0-based). Default: {defaults.eval_slice_start}.",
+    )
+    p.add_argument(
+        "--eval-slice-stop",
+        type=int,
+        default=None,
+        metavar="J",
+        help="Exclusive end line index (Python slice stop). Omit for end of file.",
+    )
+    p.add_argument(
+        "--max-examples",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Keep at most N rows after slicing. Omit for RAGConfig default ({defaults.max_examples}). "
+        "Use 0 for no cap (full slice window).",
+    )
+    return p.parse_args()
+
+
+def _cfg_from_args(args: argparse.Namespace) -> RAGConfig:
+    overrides: dict = {}
+    if args.eval_slice_start is not None:
+        overrides["eval_slice_start"] = args.eval_slice_start
+    if args.eval_slice_stop is not None:
+        overrides["eval_slice_stop"] = args.eval_slice_stop
+    if args.max_examples is not None:
+        overrides["max_examples"] = None if args.max_examples == 0 else args.max_examples
+    return RAGConfig(**overrides)
+
+
 if __name__ == "__main__":
-    cfg = RAGConfig()
+    cfg = _cfg_from_args(_parse_args())
     path = "/home/runying2/lmcache_storage"
     metrics_before = scrape_prometheus_metrics()
     host_memory_stats_before = get_host_memory_stats()

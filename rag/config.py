@@ -4,7 +4,7 @@ from pathlib import Path
 @dataclass
 class RAGConfig:
     data_root: Path = Path("data/mmdocrag")
-    ann_file: Path = Path("data/mmdocrag/dev_15.jsonl")
+    ann_file: Path = Path("data/mmdocrag/evaluation_15.jsonl")
     images_root: Path = Path("data/mmdocrag/images")
     output_dir: Path = Path("data/mmdocrag/outputs")
 
@@ -40,6 +40,10 @@ class RAGConfig:
 
     # eval (None = use entire split / JSONL / official VQA file)
     max_examples: int | None = 50
+    # MMDocRAG JSONL line indices (0-based); slice_stop is exclusive (Python slice).
+    # Rows must fall in [slice_start, slice_stop) before max_examples caps length.
+    eval_slice_start: int = 0
+    eval_slice_stop: int | None = None
 
     # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
     benchmark: str = "mmdocrag"

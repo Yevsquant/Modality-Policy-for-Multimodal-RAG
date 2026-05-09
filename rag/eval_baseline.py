@@ -25,7 +25,13 @@ def run_baseline(cfg: RAGConfig):
     if cfg.benchmark == "vqav2":
         examples = load_vqav2_examples(cfg)
     elif cfg.benchmark == "mmdocrag":
-        examples = load_examples(cfg.ann_file, cfg.images_root, limit=cfg.max_examples)
+        examples = load_examples(
+            cfg.ann_file,
+            cfg.images_root,
+            limit=cfg.max_examples,
+            slice_start=cfg.eval_slice_start,
+            slice_stop=cfg.eval_slice_stop,
+        )
     else:
         raise ValueError(f"Unknown benchmark: {cfg.benchmark!r}")
 
