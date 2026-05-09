@@ -16,10 +16,10 @@ class RAGConfig:
     retrieval_device: str = "cuda"
 
     # pruning baselines
-    pruning_keep_ratio: float = 0.50
-    pruning_percentile_ratio: float = 0.50
+    pruning_keep_ratio: float = 0.30
+    pruning_percentile_ratio: float = 0.70
     # {"no_pruning", "uniform_pruning", "visual_only_pruning", "visual_patch_pruning", "catp_pruning"}
-    pruning_mode: str = "catp_pruning" 
+    pruning_mode: str = "catp_pruning"
     patch_grid_rows: int = 4
     patch_grid_cols: int = 4
     min_visual_tokens: int = 4
@@ -39,7 +39,7 @@ class RAGConfig:
     judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
     # eval (None = use entire split / JSONL / official VQA file)
-    max_examples: int | None = 30
+    max_examples: int | None = 50
 
     # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
     benchmark: str = "mmdocrag"

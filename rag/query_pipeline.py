@@ -288,23 +288,33 @@ class RAGPipeline:
 
         for q in pruned_retrieval["selected_img_quotes"]:
             path = q.get("local_img_path")
-            if not path: continue
-            for img_path in iter_jpgs(path):
-                if img_path.exists():
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
-                    })
+            if ".jpg" in path:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"},
+                })
+            else:
+                for img_path in iter_jpgs(path):
+                    if img_path.exists():
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
+                        })
 
         for q in cached_img_quotes:
             path = q.get("local_img_path")
-            if not path: continue
-            for img_path in iter_jpgs(path):
-                if img_path.exists():
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
-                    })
+            if ".jpg" in path:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"},
+                })
+            else:
+                for img_path in iter_jpgs(path):
+                    if img_path.exists():
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
+                        })
 
         t2 = time.perf_counter()
         stream = self.client.chat.completions.create(

@@ -10,6 +10,9 @@ import io
 from typing import Any, Dict, Tuple
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
+IS_TOPK = True # False: Bbox Bbox works worse than topk
+IS_CLUSTER = True # False: Safe Crop
+
 
 def _normalize_map(attn_map: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     attn_map = attn_map.astype(np.float32)
@@ -68,7 +71,6 @@ def collect_spatial_attention_maps(
     merged_grid_w = grid_w // merge_size
 
     spatial_maps = {}
-    active_global_indices = image_token_indices[current_active_indices]
 
     for layer_idx in range(layer_start, layer_end + 1):
         patch_importance = get_fused_patch_importance(outputs, image_token_indices, current_active_indices,
@@ -177,7 +179,6 @@ def get_fused_patch_importance(
         fused_importance = stacked.sum(dim=0)
     else:
         raise ValueError(f"Unknown layer_reduce: {layer_reduce}")
-    
     importance_2d = fused_importance.view(1, 1, merged_grid_h, merged_grid_w)
     # Apply a 3x3 or 5x5 Average Pool with stride 1 to smear the attention into blobs.
     # This connects nearby text tokens and dilutes isolated noise spikes.
@@ -201,7 +202,6 @@ class Qwen2VLCATPBoundingBoxCropper:
         self.device = device
         if "gptq" in model_id.lower():
             from optimum.utils import is_gptqmodel_available
-
             if not is_gptqmodel_available():
                 raise RuntimeError(
                     "Loading this GPTQ model requires gptqmodel (used by optimum with transformers). "
@@ -225,11 +225,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         norm_states = F.normalize(hidden_states.float(), p=2, dim=1)
         sim_matrix = torch.matmul(norm_states, norm_states.T)
 
-        unique_mask = torch.ones(
-            hidden_states.shape[0],
-            dtype=torch.bool,
-            device=hidden_states.device,
-        )
+        unique_mask = torch.ones(hidden_states.shape[0], dtype=torch.bool, device=hidden_states.device,)
 
         for i in range(hidden_states.shape[0]):
             if unique_mask[i]:
@@ -239,15 +235,6 @@ class Qwen2VLCATPBoundingBoxCropper:
 
         return unique_mask
 
-    def _get_prune_stages(self, num_layers: int, num_cuts: int):
-        return np.linspace(0, num_layers - 1, num_cuts + 1, dtype=int)[1:].tolist()
-
-    def _get_keep_ratios(self, final_keep_ratio: float, num_cuts: int):
-        return [
-            final_keep_ratio ** (i / num_cuts)
-            for i in range(1, num_cuts + 1)
-        ]
-
     def _attention_entropy(self, scores: torch.Tensor, eps: float = 1e-12) -> float:
         """
         scores: shape (num_image_tokens,)
@@ -256,6 +243,62 @@ class Qwen2VLCATPBoundingBoxCropper:
         probs = probs / (probs.sum() + eps)
         entropy = -(probs * torch.log(probs + eps)).sum()
         return float(entropy.detach().cpu())
+
+    def _pick_tokens(self, masked_importance, current_active_indices, keep_ratio = 0.5, percentile_ratio = 0.7):
+        if IS_TOPK:
+            keep_n = max(4, int(masked_importance.numel() * keep_ratio))
+            top_idx_local = torch.topk(masked_importance, keep_n).indices
+            selected_active_indices = current_active_indices[top_idx_local]
+        else:
+            threshold = torch.quantile(masked_importance.float(), percentile_ratio,)
+            top_idx_local = masked_importance > threshold
+            if top_idx_local.sum() == 0: top_idx_local[torch.argmax(masked_importance)] = True
+            selected_active_indices = current_active_indices[top_idx_local]
+        
+        return selected_active_indices
+
+    def _safe_crop(
+        self,
+        current_active_indices: torch.Tensor,
+        selected_active_indices: torch.Tensor,
+        merged_grid_h: int,
+        merged_grid_w: int,
+        image_width: int,
+        image_height: int,
+    ):
+        px_per_grid_x = image_width / merged_grid_w
+        px_per_grid_y = image_height / merged_grid_h
+
+        selected_y = selected_active_indices // merged_grid_w
+        selected_x = selected_active_indices % merged_grid_w
+        min_x, max_x = selected_x.min(), selected_x.max()
+        min_y, max_y = selected_y.min(), selected_y.max()
+        min_x, max_x = int(min_x.detach().cpu()), int(max_x.detach().cpu())
+        min_y, max_y = int(min_y.detach().cpu()), int(max_y.detach().cpu())
+        all_active_y = current_active_indices // merged_grid_w
+        all_active_x = current_active_indices % merged_grid_w
+        bbox_mask = ((all_active_x >= min_x) & (all_active_x <= max_x) & (all_active_y >= min_y) & (all_active_y <= max_y))
+
+        pruned_active_indices = current_active_indices[bbox_mask]
+        # Safety fallback
+        if pruned_active_indices.numel() == 0:
+            pruned_active_indices = selected_active_indices
+
+        x_min_px, x_max_px = int(min_x * px_per_grid_x), int((max_x + 1) * px_per_grid_x)
+        y_min_px, y_max_px = int(min_y * px_per_grid_y), int((max_y + 1) * px_per_grid_y)
+
+        x_min_px, x_max_px = max(0, x_min_px), min(image_width, x_max_px)
+        y_min_px, y_max_px = max(0, y_min_px), min(image_height, y_max_px)
+        return {
+            "active_visual_token_indices_after_pruning": pruned_active_indices,
+            "clusters": [{
+                "cluster_id": 0,
+                "grid_bbox": {"min_x": min_x, "max_x": max_x, "min_y": min_y, "max_y": max_y},
+                "pixel_bbox": {"x_min": x_min_px, "x_max": x_max_px, "y_min": y_min_px, "y_max": y_max_px},
+                "annotation": "Fallback: Part of the original image."
+            }],
+            "tokens_after_bbox": int(pruned_active_indices.numel()),
+        }
 
     def _cluster_active_patches(self, active_patch_mask: torch.Tensor, max_gap: int = 1,):
         """
@@ -325,33 +368,24 @@ class Qwen2VLCATPBoundingBoxCropper:
 
         return clusters
 
-    def _bbox_prune_by_attention_percentile(
+    def _cluster_crop(
         self,
-        patch_importance: torch.Tensor,
-        current_active_indices: torch.Tensor,
+        selected_active_indices: torch.Tensor,
         merged_grid_h: int,
         merged_grid_w: int,
         image_width: int,
         image_height: int,
-        keep_ratio: float = 0.3,
-        percentile_ratio: float = 0.7,
         max_gap: int = 1,
     ):
-
-        device = patch_importance.device
-        
-        keep_n = max(4, int(patch_importance.numel() * keep_ratio))
-        top_idx_local = torch.topk(patch_importance, keep_n).indices
-        selected_active_indices = current_active_indices[top_idx_local]
+        device = selected_active_indices.device
+        px_per_grid_x = image_width / merged_grid_w
+        px_per_grid_y = image_height / merged_grid_h
 
         active_patch_mask = torch.zeros(merged_grid_h * merged_grid_w, dtype=torch.bool, device=device,)
         active_patch_mask[selected_active_indices] = True
         active_patch_mask = active_patch_mask.reshape(merged_grid_h, merged_grid_w)
 
         clusters = self._cluster_active_patches(active_patch_mask=active_patch_mask, max_gap=max_gap,)
-
-        px_per_grid_x = image_width / merged_grid_w
-        px_per_grid_y = image_height / merged_grid_h
 
         cluster_infos = []
         final_active_indices = []
@@ -418,6 +452,34 @@ class Qwen2VLCATPBoundingBoxCropper:
             "tokens_after_bbox": true_tokens_after,
         }
 
+    def _prune_by_attention(
+        self,
+        patch_importance: torch.Tensor,
+        current_active_indices: torch.Tensor,
+        hidden_states: torch.Tensor,
+        merged_grid_h: int,
+        merged_grid_w: int,
+        image_width: int,
+        image_height: int,
+        keep_ratio: float = 0.3,
+        percentile_ratio: float = 0.7,
+        similarity_threshold: float = 0.98,
+        max_gap: int = 1,
+    ):
+
+        unique_mask = self._diversity_pre_filter(hidden_states, similarity_threshold)
+        masked_importance = patch_importance.clone()
+        masked_importance[~unique_mask] = -float('inf')
+
+        selected_active_indices = self._pick_tokens(masked_importance, current_active_indices, keep_ratio, percentile_ratio)
+
+        res = None
+        if IS_CLUSTER:
+            res = self._cluster_crop(selected_active_indices, merged_grid_h, merged_grid_w, image_width, image_height, max_gap)
+        else:
+            res = self._safe_crop(current_active_indices, selected_active_indices, merged_grid_h, merged_grid_w, image_width, image_height)
+        return res
+
     def get_pruned_image(
         self,
         image: Image.Image,
@@ -433,25 +495,15 @@ class Qwen2VLCATPBoundingBoxCropper:
         """
         width, height = image.size
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": query}
-                ]
-            }
-        ]
+        messages = [{"role": "user",
+                    "content": [{"type": "image", "image": image},{"type": "text", "text": query}]
+        }]
         
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) # Qwen style prompt
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
-            outputs = self.model(
-                **inputs,
-                output_attentions=True,
-                output_hidden_states=True,
-            )
+            outputs = self.model(**inputs, output_attentions=True, output_hidden_states=True,)
 
         # Map Qwen2-VL's Dynamic Grid
         input_ids = inputs.input_ids.squeeze(0)
@@ -472,30 +524,21 @@ class Qwen2VLCATPBoundingBoxCropper:
             raise ValueError("Could not find image tokens in input_ids.")
 
         early_image_features = outputs.hidden_states[0].squeeze(0)[image_token_indices]
-        # active_mask = self._diversity_pre_filter(early_image_features)
         active_mask = torch.ones(early_image_features.shape[0], dtype=torch.bool, device=early_image_features.device,)
         active_image_token_indices = image_token_indices[active_mask]
-        current_active_indices = torch.arange(
-            image_token_indices.numel(),
-            device=input_ids.device,
-        )[active_mask]
-        if active_image_token_indices.numel() == 0:
-            raise ValueError("Diversity pre-filter removed all image tokens.")
-        diversity_keep_indices = current_active_indices.detach().cpu().tolist()
+        current_active_indices = torch.arange(image_token_indices.numel(),device=input_ids.device,)[active_mask]
         
         # Find query token idx
         query_ids = self.processor.tokenizer(query, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0).to(input_ids.device)
         def find_subsequence(seq, subseq):
             n, m = seq.numel(), subseq.numel()
             for i in range(n - m + 1):
-                if torch.equal(seq[i:i + m], subseq):
-                    return i
+                if torch.equal(seq[i:i + m], subseq): return i
             return -1
         query_start_idx = find_subsequence(input_ids, query_ids)
         if query_start_idx == -1:
             raise ValueError("Could not find query tokens in input_ids.")
         query_end_idx = query_start_idx + query_ids.numel()
-        percentile_ratio = 0.5
         merged_grid_h = grid_h // merge_size
         merged_grid_w = grid_w // merge_size
 
@@ -571,9 +614,10 @@ class Qwen2VLCATPBoundingBoxCropper:
             head_reduce="max",   # "max" or "mean"
             layer_reduce="sum",  # "mean", "max", or "sum"
         )
-        bbox_info = self._bbox_prune_by_attention_percentile(
+        bbox_info = self._prune_by_attention(
             patch_importance=patch_importance,
             current_active_indices=current_active_indices,
+            hidden_states=early_image_features,
             merged_grid_h=merged_grid_h,
             merged_grid_w=merged_grid_w,
             image_width=width,
@@ -582,73 +626,6 @@ class Qwen2VLCATPBoundingBoxCropper:
             percentile_ratio=percentile_ratio,
         )
         true_tokens_after = bbox_info["tokens_after_bbox"]
-
-
-        # Execute progressive contextual pruning across transformer depth. (Old)
-        # num_layers = len(outputs.attentions)
-        # num_cuts = min(1, num_layers-1)
-        # prune_stages = self._get_prune_stages(num_layers, num_cuts)
-        # keep_ratios = self._get_keep_ratios(keep_ratio, num_cuts)
-        # progressive_stages = []
-        # final_scores = None
-        # for layer_idx, target_ratio in zip(prune_stages, keep_ratios):
-        #     layer_attn = outputs.attentions[layer_idx].mean(dim=1).squeeze(0)
-        #     active_global_indices = image_token_indices[current_active_indices]
-        #     query_to_image_attn = layer_attn[query_start_idx:query_ned_idx, active_global_indices]
-        #     patch_importance = query_to_image_attn.mean(dim=0)
-
-        #     tokens_before_stage = int(current_active_indices.numel())
-        #     k = max(1, int(num_image_tokens * target_ratio))
-        #     k = min(k, tokens_before_stage)
-
-        #     top_k = torch.topk(patch_importance, k)
-        #     current_active_indices = current_active_indices[top_k.indices]
-        #     final_scores = top_k.values.detach().float().cpu().tolist()
-
-        #     progressive_stages.append({
-        #         "layer_idx": int(layer_idx),
-        #         "target_ratio": float(target_ratio),
-        #         "tokens_before": tokens_before_stage,
-        #         "tokens_after": int(current_active_indices.numel()),
-        #         "keep_indices": [
-        #             int(i) for i in current_active_indices.detach().cpu().tolist()
-        #         ],
-        #     })
-
-        # top_k_indices = current_active_indices.detach().cpu().numpy()
-        # top_k_scores = final_scores or []
-        # k = int(current_active_indices.numel())
-
-        # # Translate 1D Tokens back to 2D Bounding Box
-        # # Qwen2-VL flattens the grid row-by-row
-        # merged_grid_w = grid_w // merge_size
-        # merged_grid_h = grid_h // merge_size
-
-        # patch_y = top_k_indices // merged_grid_w
-        # patch_x = top_k_indices % merged_grid_w
-        
-        # # Get bounding box in grid coordinates
-        # min_grid_x, max_grid_x = np.min(patch_x), np.max(patch_x)
-        # min_grid_y, max_grid_y = np.min(patch_y), np.max(patch_y)
-        
-        # # Convert grid coordinates to physical pixel coordinates based on original image size
-        # px_per_grid_x = width / merged_grid_w
-        # px_per_grid_y = height / merged_grid_h
-        
-        # x_min = int(min_grid_x * px_per_grid_x)
-        # y_min = int(min_grid_y * px_per_grid_y)
-        # x_max = int((max_grid_x + 1) * px_per_grid_x)
-        # y_max = int((max_grid_y + 1) * px_per_grid_y)
-        
-        # # Clamp to image boundaries
-        # x_min, y_min = max(0, x_min), max(0, y_min)
-        # x_max, y_max = min(width, x_max), min(height, y_max)
-        
-        # # Physical Safe Crop
-        # cropped_image = image.crop((x_min, y_min, x_max, y_max))
-        # bbox_grid_w = max_grid_x - min_grid_x + 1
-        # bbox_grid_h = max_grid_y - min_grid_y + 1
-        # true_tokens_after = int(bbox_grid_w * bbox_grid_h)
 
         metadata = {
             "tokens_before": num_image_tokens,
