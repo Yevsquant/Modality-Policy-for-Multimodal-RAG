@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 import math
 import matplotlib.pyplot as plt
+from collections import deque
 from PIL import Image, ImageDraw
 import base64
 import io
@@ -50,6 +51,7 @@ def collect_spatial_attention_maps(
     image_token_indices,
     current_active_indices,
     query_start_idx,
+    query_end_idx,
     grid_h: int,
     grid_w: int,
     merge_size: int,
@@ -69,10 +71,9 @@ def collect_spatial_attention_maps(
     active_global_indices = image_token_indices[current_active_indices]
 
     for layer_idx in range(layer_start, layer_end + 1):
-        layer_attn = outputs.attentions[layer_idx].squeeze(0)
-
-        query_to_image_attn = layer_attn[:,query_start_idx:,:,][:, :, active_global_indices]
-        patch_importance = query_to_image_attn.mean(dim=1).max(dim=0).values
+        patch_importance = get_fused_patch_importance(outputs, image_token_indices, current_active_indices,
+                                                      query_start_idx, query_end_idx,
+                                                      merged_grid_h, merged_grid_w, [layer_idx], "max", "sum")
 
         spatial_map = _patch_importance_to_spatial_map(
             patch_importance=patch_importance,
@@ -141,6 +142,9 @@ def get_fused_patch_importance(
     image_token_indices,
     current_active_indices,
     query_start_idx,
+    query_end_idx,
+    merged_grid_h: int,
+    merged_grid_w: int,
     selected_layers=(10, 11, 12, 13),
     head_reduce="max",   # "max" or "mean"
     layer_reduce="sum", # "mean", "max", or "sum"
@@ -149,18 +153,13 @@ def get_fused_patch_importance(
     layer_importances = []
 
     for layer_idx in selected_layers:
-        # (batch, heads, seq, seq) -> (heads, seq, seq)
         layer_attn = outputs.attentions[layer_idx].squeeze(0)
-        # (heads, query_tokens, active_image_tokens)
-        query_to_image_attn = layer_attn[:,query_start_idx:,:,][:, :, active_global_indices]
-        # (heads, active_image_tokens)
+        query_to_image_attn = layer_attn[:,query_start_idx:query_end_idx,:,][:, :, active_global_indices]
         head_patch_importance = query_to_image_attn.mean(dim=1)
 
         if head_reduce == "max":
-            # keep strongest grounding head
             patch_importance = head_patch_importance.max(dim=0).values
         elif head_reduce == "mean":
-            # smoother, more conservative
             patch_importance = head_patch_importance.mean(dim=0)
         else:
             raise ValueError(f"Unknown head_reduce: {head_reduce}")
@@ -178,8 +177,24 @@ def get_fused_patch_importance(
         fused_importance = stacked.sum(dim=0)
     else:
         raise ValueError(f"Unknown layer_reduce: {layer_reduce}")
+    
+    importance_2d = fused_importance.view(1, 1, merged_grid_h, merged_grid_w)
+    # Apply a 3x3 or 5x5 Average Pool with stride 1 to smear the attention into blobs.
+    # This connects nearby text tokens and dilutes isolated noise spikes.
+    smoothed_2d = F.avg_pool2d(importance_2d, kernel_size=5, stride=1, padding=2, count_include_pad=False)
+    # Create a center-weighted mask (1.0 in the center, decaying towards 0.5 at the edges)
+    y_coords = torch.linspace(-1, 1, merged_grid_h, device=smoothed_2d.device)
+    x_coords = torch.linspace(-1, 1, merged_grid_w, device=smoothed_2d.device)
+    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing="ij")
+    # Calculate distance from center, normalize, and invert
+    distance_from_center = torch.sqrt(x_grid**2 + y_grid**2)
+    # Tweak 0.5 to be more/less aggressive on edge penalization
+    edge_penalty_mask = 1.0 - (distance_from_center * 0.5) 
+    edge_penalty_mask = torch.clamp(edge_penalty_mask, min=0.1) # Don't zero out edges completely
+    smoothed_2d = smoothed_2d * edge_penalty_mask.view(1, 1, merged_grid_h, merged_grid_w)
+    final_fused_importance = smoothed_2d.flatten()
 
-    return fused_importance
+    return final_fused_importance
 
 class Qwen2VLCATPBoundingBoxCropper:
     def __init__(self, model_id="Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4", device="cuda"):
@@ -242,11 +257,11 @@ class Qwen2VLCATPBoundingBoxCropper:
         entropy = -(probs * torch.log(probs + eps)).sum()
         return float(entropy.detach().cpu())
 
-
     def _cluster_active_patches(self, active_patch_mask: torch.Tensor, max_gap: int = 1,):
         """
+        Clusters active patches but prevents "spiderwebbing" by enforcing a minimum
+        bounding box density.
         active_patch_mask: bool tensor, shape = (merged_grid_h, merged_grid_w)
-
         max_gap:
             Allows small gaps between active patches.
             max_gap=1 means patches within a 3x3 neighborhood are connected.
@@ -256,24 +271,27 @@ class Qwen2VLCATPBoundingBoxCropper:
             list of clusters, each cluster is list of (y, x)
         """
         h, w = active_patch_mask.shape
+
         visited = torch.zeros_like(active_patch_mask, dtype=torch.bool)
-
-        clusters = []
-
+        clusters: list[list[tuple[int, int]]] = []
         active_coords = active_patch_mask.nonzero(as_tuple=False)
+        total_cells = h * w
+        dominance_cutoff = 0.7 * total_cells
 
         for coord in active_coords:
             start_y, start_x = int(coord[0]), int(coord[1])
 
-            if visited[start_y, start_x]:
-                continue
+            if visited[start_y, start_x]: continue
 
-            queue = [(start_y, start_x)]
+            queue: deque[tuple[int, int]] = deque([(start_y, start_x)])
             visited[start_y, start_x] = True
-            cluster = []
+            cluster: list[tuple[int, int]] = []
+
+            c_min_y, c_max_y = start_y, start_y
+            c_min_x, c_max_x = start_x, start_x
 
             while queue:
-                y, x = queue.pop(0)
+                y, x = queue.popleft()
                 cluster.append((y, x))
 
                 y0 = max(0, y - max_gap)
@@ -284,8 +302,24 @@ class Qwen2VLCATPBoundingBoxCropper:
                 for ny in range(y0, y1 + 1):
                     for nx in range(x0, x1 + 1):
                         if active_patch_mask[ny, nx] and not visited[ny, nx]:
+                            new_min_y, new_max_y = min(c_min_y, ny), max(c_max_y, ny)
+                            new_min_x, new_max_x = min(c_min_x, nx), max(c_max_x, nx)
+
                             visited[ny, nx] = True
                             queue.append((ny, nx))
+                            c_min_y, c_max_y = new_min_y, new_max_y
+                            c_min_x, c_max_x = new_min_x, new_max_x
+
+            has_visited_cells = visited[c_min_y:c_max_y + 1, c_min_x:c_max_x + 1].sum()
+            cluster_area = (c_max_y - c_min_y + 1) * (c_max_x - c_min_x + 1)
+            cluster_density = len(cluster) / max(1, cluster_area)
+            if cluster_density < 0.15:
+                continue
+            if cluster_area - has_visited_cells < 16 and has_visited_cells / cluster_area > 0.5:
+                continue
+            visited[c_min_y:c_max_y + 1, c_min_x:c_max_x + 1] = True
+            if cluster_area >= dominance_cutoff:
+                return [cluster]
 
             clusters.append(cluster)
 
@@ -297,74 +331,92 @@ class Qwen2VLCATPBoundingBoxCropper:
         current_active_indices: torch.Tensor,
         merged_grid_h: int,
         merged_grid_w: int,
+        image_width: int,
+        image_height: int,
+        keep_ratio: float = 0.3,
         percentile_ratio: float = 0.7,
+        max_gap: int = 1,
     ):
-        """
-        BBox-based visual token pruning.
-
-        percentile_ratio:
-            0.7 means keep tokens whose attention is above the 70th percentile.
-            Higher value => more aggressive pruning.
-        """
-
-        assert 0.0 <= percentile_ratio <= 1.0
 
         device = patch_importance.device
+        
+        keep_n = max(4, int(patch_importance.numel() * keep_ratio))
+        top_idx_local = torch.topk(patch_importance, keep_n).indices
+        selected_active_indices = current_active_indices[top_idx_local]
 
-        # 1. Convert percentile ratio into threshold
-        threshold = torch.quantile(patch_importance.float(),percentile_ratio,)
+        active_patch_mask = torch.zeros(merged_grid_h * merged_grid_w, dtype=torch.bool, device=device,)
+        active_patch_mask[selected_active_indices] = True
+        active_patch_mask = active_patch_mask.reshape(merged_grid_h, merged_grid_w)
 
-        # 2. Select high-attention active tokens
-        high_mask = patch_importance > threshold
+        clusters = self._cluster_active_patches(active_patch_mask=active_patch_mask, max_gap=max_gap,)
 
-        # Safety fallback: avoid pruning everything
-        if high_mask.sum() == 0:
-            high_mask[torch.argmax(patch_importance)] = True
+        px_per_grid_x = image_width / merged_grid_w
+        px_per_grid_y = image_height / merged_grid_h
 
-        selected_active_indices = current_active_indices[high_mask]
+        cluster_infos = []
+        final_active_indices = []
+        true_tokens_after = 0
 
-        # 3. Convert selected 1D token indices to 2D grid coordinates
-        selected_y = selected_active_indices // merged_grid_w
-        selected_x = selected_active_indices % merged_grid_w
+        for cluster_id, cluster in enumerate(clusters, start=1):
+            ys, xs = [p[0] for p in cluster], [p[1] for p in cluster]
 
-        # 4. Build bounding box around selected high-attention tokens
-        min_x = selected_x.min()
-        max_x = selected_x.max()
-        min_y = selected_y.min()
-        max_y = selected_y.max()
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
 
-        # 5. Keep every token inside the bbox, not only top attention tokens
-        all_active_y = current_active_indices // merged_grid_w
-        all_active_x = current_active_indices % merged_grid_w
+            x_min_px, x_max_px = int(min_x * px_per_grid_x), int((max_x + 1) * px_per_grid_x)
+            y_min_px, y_max_px = int(min_y * px_per_grid_y), int((max_y + 1) * px_per_grid_y)
 
-        bbox_mask = (
-            (all_active_x >= min_x)
-            & (all_active_x <= max_x)
-            & (all_active_y >= min_y)
-            & (all_active_y <= max_y)
-        )
+            x_min_px, x_max_px = max(0, x_min_px), min(image_width, x_max_px)
+            y_min_px, y_max_px = max(0, y_min_px), min(image_height, y_max_px)
 
-        pruned_active_indices = current_active_indices[bbox_mask]
+            cluster_token_indices = []
+            cluster_scores = []
 
-        # Safety fallback
-        if pruned_active_indices.numel() == 0:
-            pruned_active_indices = selected_active_indices
+            for y, x in cluster:
+                token_idx = y * merged_grid_w + x
+                cluster_token_indices.append(token_idx)
+                final_active_indices.append(token_idx)
 
-        bbox_info = {
-            "threshold": float(threshold.detach().cpu()),
-            "percentile_ratio": float(percentile_ratio),
-            "bbox_grid": {
-                "min_x": int(min_x.detach().cpu()),
-                "max_x": int(max_x.detach().cpu()),
-                "min_y": int(min_y.detach().cpu()),
-                "max_y": int(max_y.detach().cpu()),
-            },
-            "tokens_before": int(current_active_indices.numel()),
-            "high_attention_tokens": int(selected_active_indices.numel()),
-            "tokens_after_bbox": int(pruned_active_indices.numel()),
+            cluster_infos.append({
+                "cluster_id": cluster_id,
+                # Grid position in visual-token coordinate space
+                "grid_bbox": {
+                    "min_x": int(min_x), "max_x": int(max_x),
+                    "min_y": int(min_y), "max_y": int(max_y),
+                },
+                "pixel_bbox": {
+                    "x_min": int(x_min_px), "x_max": int(x_max_px),
+                    "y_min": int(y_min_px), "y_max": int(y_max_px),
+                },
+                "annotation": (
+                    f"Cluster {cluster_id}: position in original image "
+                    f"(x_min={x_min_px}, x_max={x_max_px}, "
+                    f"y_min={y_min_px}, y_max={y_max_px})"
+                ),
+            })
+            true_tokens_after += int((max_x - min_x + 1) * (max_y - min_y + 1))
+
+        final_active_indices = sorted(set(final_active_indices))
+        original_total_tokens = merged_grid_h * merged_grid_w
+
+        if true_tokens_after >= original_total_tokens:
+            print(f"[Warning] Sparse Patch Problem detected. Bbox tokens ({true_tokens_after}) >= Original ({original_total_tokens}). Falling back to full image.")
+            return {
+                "active_visual_token_indices_after_pruning": list(range(original_total_tokens)),
+                "clusters": [{
+                    "cluster_id": 0,
+                    "grid_bbox": {"min_x": 0, "max_x": merged_grid_w - 1, "min_y": 0, "max_y": merged_grid_h - 1},
+                    "pixel_bbox": {"x_min": 0, "x_max": image_width, "y_min": 0, "y_max": image_height},
+                    "annotation": "Fallback: Full Image due to sparse scattering."
+                }],
+                "tokens_after_bbox": original_total_tokens,
+            }
+
+        return {
+            "active_visual_token_indices_after_pruning": final_active_indices,
+            "clusters": cluster_infos,
+            "tokens_after_bbox": true_tokens_after,
         }
-
-        return pruned_active_indices, bbox_info
 
     def get_pruned_image(
         self,
@@ -442,6 +494,10 @@ class Qwen2VLCATPBoundingBoxCropper:
         query_start_idx = find_subsequence(input_ids, query_ids)
         if query_start_idx == -1:
             raise ValueError("Could not find query tokens in input_ids.")
+        query_end_idx = query_start_idx + query_ids.numel()
+        percentile_ratio = 0.5
+        merged_grid_h = grid_h // merge_size
+        merged_grid_w = grid_w // merge_size
 
         # # Layer-wise measurement: analyze query -> image attention for every layer (dev)
         layer_metrics = []
@@ -449,12 +505,9 @@ class Qwen2VLCATPBoundingBoxCropper:
         # analysis_topk_ratio = keep_ratio
 
         # for layer_idx in range(len(outputs.attentions)):
-        #     layer_attn = outputs.attentions[layer_idx].mean(dim=1).squeeze(0)
-
-        #     active_global_indices = image_token_indices[current_active_indices]
-        #     query_to_image_attn = layer_attn[query_start_idx:, active_global_indices]
-
-        #     patch_importance = query_to_image_attn.mean(dim=0)
+        #     patch_importance = get_fused_patch_importance(outputs, image_token_indices, current_active_indices,
+        #                                                   query_start_idx, query_end_idx,
+        #                                                   merged_grid_h, merged_grid_w, [layer_idx], "mean", "sum")
 
         #     num_active = int(current_active_indices.numel())
         #     analysis_k = max(1, int(num_active * analysis_topk_ratio))
@@ -486,18 +539,19 @@ class Qwen2VLCATPBoundingBoxCropper:
         #     })
         #     prev_topk_set = topk_set
 
-        # # Spatial Heat Map (dev)
+        # Spatial Heat Map (dev)
         # spatial_maps = collect_spatial_attention_maps(
         #     outputs=outputs,
         #     input_ids=input_ids,
         #     image_token_indices=image_token_indices,
         #     current_active_indices=current_active_indices,
         #     query_start_idx=query_start_idx,
+        #     query_end_idx=query_end_idx,
         #     grid_h=grid_h,
         #     grid_w=grid_w,
         #     merge_size=merge_size,
-        #     layer_start=6,
-        #     layer_end=14,
+        #     layer_start=8,
+        #     layer_end=16,
         # )
         # save_layer_spatial_attention_grid(
         #     image=image,
@@ -505,26 +559,29 @@ class Qwen2VLCATPBoundingBoxCropper:
         #     save_path=f"data/mmdocrag/analysis/{image_cache_id}_{tag_hash}_spatial_attention_layers_6_to_14.png",
         # )
 
-        percentile_ratio = 0.5
-        merged_grid_h = grid_h // merge_size
-        merged_grid_w = grid_w // merge_size
         patch_importance = get_fused_patch_importance(
             outputs=outputs,
             image_token_indices=image_token_indices,
             current_active_indices=current_active_indices,
             query_start_idx=query_start_idx,
+            query_end_idx=query_end_idx,
+            merged_grid_h=merged_grid_h,
+            merged_grid_w=merged_grid_w,
             selected_layers=(10, 11, 12, 13),
+            head_reduce="max",   # "max" or "mean"
+            layer_reduce="sum",  # "mean", "max", or "sum"
         )
-        current_active_indices, bbox_info = self._bbox_prune_by_attention_percentile(
+        bbox_info = self._bbox_prune_by_attention_percentile(
             patch_importance=patch_importance,
             current_active_indices=current_active_indices,
             merged_grid_h=merged_grid_h,
             merged_grid_w=merged_grid_w,
+            image_width=width,
+            image_height=height,
+            keep_ratio=keep_ratio,
             percentile_ratio=percentile_ratio,
         )
         true_tokens_after = bbox_info["tokens_after_bbox"]
-        x_min, x_max, y_min, y_max = bbox_info["bbox_grid"].values()
-        cropped_image = image.crop((x_min, y_min, x_max, y_max))
 
 
         # Execute progressive contextual pruning across transformer depth. (Old)
@@ -537,7 +594,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         # for layer_idx, target_ratio in zip(prune_stages, keep_ratios):
         #     layer_attn = outputs.attentions[layer_idx].mean(dim=1).squeeze(0)
         #     active_global_indices = image_token_indices[current_active_indices]
-        #     query_to_image_attn = layer_attn[query_start_idx:, active_global_indices]
+        #     query_to_image_attn = layer_attn[query_start_idx:query_ned_idx, active_global_indices]
         #     patch_importance = query_to_image_attn.mean(dim=0)
 
         #     tokens_before_stage = int(current_active_indices.numel())
@@ -601,7 +658,7 @@ class Qwen2VLCATPBoundingBoxCropper:
             "layer_metrics": layer_metrics if len(layer_metrics) != 0 else None,
         }
 
-        return cropped_image, metadata
+        return bbox_info["clusters"], metadata
 
     def get_pruned_image_base64(self, image: Image.Image, query: str, keep_ratio: float = 0.3) -> str:
         """

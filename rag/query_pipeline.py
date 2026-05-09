@@ -14,6 +14,20 @@ from rag.prompt_builder import build_prompt
 from rag.pruner import RetrievalPruner
 from rag.retriever import QuoteRetriever
 
+def iter_jpgs(path: str | Path) -> list[Path]:
+    p = Path(path)
+    if p.is_file():
+        return [p]
+    if p.is_dir():
+        # deterministic order: 1.jpg, 2.jpg, 10.jpg, ...
+        def key(x: Path):
+            try:
+                return (0, int(x.stem))
+            except ValueError:
+                return (1, x.name)
+        return sorted(p.glob("*.jpg"), key=key)
+    return []
+
 def encode_image(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
@@ -233,12 +247,9 @@ class RAGPipeline:
             pruned_img_path = q.get("local_img_path")
             tag = q.get("tag") or []
             tag_hash = q.get("tag_hash") or ""
-            if (
-                not image_id
-                or not pruned_img_path
+            if (not image_id or not pruned_img_path
                 or not Path(pruned_img_path).exists()
-                or not tag
-                or not tag_hash
+                or not tag or not tag_hash
             ):
                 continue
             entry = CachedPrunedImage(
@@ -277,19 +288,23 @@ class RAGPipeline:
 
         for q in pruned_retrieval["selected_img_quotes"]:
             path = q.get("local_img_path")
-            if path and Path(path).exists():
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
-                })
-        
+            if not path: continue
+            for img_path in iter_jpgs(path):
+                if img_path.exists():
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
+                    })
+
         for q in cached_img_quotes:
             path = q.get("local_img_path")
-            if path and Path(path).exists():
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}
-                })
+            if not path: continue
+            for img_path in iter_jpgs(path):
+                if img_path.exists():
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
+                    })
 
         t2 = time.perf_counter()
         stream = self.client.chat.completions.create(
@@ -322,10 +337,7 @@ class RAGPipeline:
         ]
 
         self._store_pruned_images_in_cache(
-            pruned_img_quotes=[
-                q
-                for q in pruned_retrieval["selected_img_quotes"]
-            ],
+            pruned_img_quotes=[q for q in pruned_retrieval["selected_img_quotes"]],
         )
 
         ttft = None if first_token_time is None else (first_token_time - t2)

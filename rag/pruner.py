@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 from transformers import CLIPModel, CLIPProcessor
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -312,7 +312,7 @@ class RetrievalPruner:
         assert self.catp_cropper is not None
         image_path = Path(img_path)
         image = Image.open(image_path).convert("RGB")
-        pruned_image, meta = self.catp_cropper.get_pruned_image(
+        clusters, meta = self.catp_cropper.get_pruned_image(
             image=image,
             query=query,
             keep_ratio=self.keep_ratio,
@@ -323,12 +323,7 @@ class RetrievalPruner:
 
         before = int(meta.get("tokens_before", before))
         after = int(meta.get("tokens_after", after))
-        pruned_path = self._save_pruned_image(
-            image_path=image_path,
-            image=pruned_image,
-            mode=self.mode,
-            quote=q,
-        )
+        pruned_path = self._save_clusters(clusters=clusters, mode=self.mode, quote=q)
 
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"] = {
@@ -384,8 +379,9 @@ class RetrievalPruner:
         text = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-._")
         return text or default
 
-    def _pruned_output_path(self, image_path: Path, mode: str, quote: Dict | None = None) -> Path:
+    def _pruned_output_path(self, image_path: Path, mode: str, quote: Dict | None = None, is_dir: bool = False) -> Path:
         suffix = image_path.suffix or ".jpg"
+        suffix = "" if is_dir else suffix
         if quote and quote.get("tag_hash"):
             image_id = self._safe_filename_part(
                 quote.get("image_cache_id") or quote.get("quote_id"),
@@ -423,3 +419,26 @@ class RetrievalPruner:
         out_path = self._pruned_output_path(image_path=image_path, mode=mode, quote=quote)
         image.save(out_path)
         return out_path
+
+    def _save_clusters(
+        self,
+        clusters: List[Dict[str, Any]],
+        mode: str,
+        quote: Dict | None = None,
+    ) -> Path:
+        cluster_path = Path(quote["local_img_path"])
+        out_path_dir = self._pruned_output_path(image_path=cluster_path, mode=mode, quote=quote, is_dir=True)
+        out_path_dir = Path(out_path_dir)
+        out_path_dir.mkdir(parents=True, exist_ok=True)
+        image = Image.open(cluster_path).convert("RGB")
+        for cluster in clusters:
+            cluster_id = cluster["cluster_id"]
+            x_min, x_max, y_min, y_max = cluster["pixel_bbox"].values()
+            cropped_image = image.crop((x_min, y_min, x_max, y_max))
+            stem = str(cluster_id)
+            jpg_path = out_path_dir / f"{stem}.jpg"
+            json_path = out_path_dir / f"{stem}.json"
+            cropped_image.save(jpg_path, format="JPEG", quality=95)
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(dict(cluster), f, indent=2, ensure_ascii=False)
+        return out_path_dir
