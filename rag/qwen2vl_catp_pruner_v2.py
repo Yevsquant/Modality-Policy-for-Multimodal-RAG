@@ -7,11 +7,16 @@ from collections import deque
 from PIL import Image, ImageDraw
 import base64
 import io
+import os
 from typing import Any, Dict, Tuple
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 IS_TOPK = True # False: Bbox Bbox works worse than topk
 IS_CLUSTER = True # False: Safe Crop
+
+# Below Qwen2-VL default chat budget (28*28*1280): CATP uses eager attention plus full
+# attentions/hidden_states, so vision patch count must stay small to avoid OOM.
+_DEFAULT_CATP_MAX_PIXELS = 28 * 28 * 1280
 
 
 def _normalize_map(attn_map: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -198,8 +203,18 @@ def get_fused_patch_importance(
     return final_fused_importance
 
 class Qwen2VLCATPBoundingBoxCropper:
-    def __init__(self, model_id="Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4", device="cuda"):
+    def __init__(
+        self,
+        model_id="Qwen/Qwen2-VL-7B-Instruct-GPTQ-Int4",
+        device="cuda",
+        catp_max_pixels: int | None = None,
+    ):
         self.device = device
+        if catp_max_pixels is not None:
+            self.catp_max_pixels = int(catp_max_pixels)
+        else:
+            env_v = os.environ.get("MRAG_CATP_MAX_PIXELS")
+            self.catp_max_pixels = int(env_v) if env_v else _DEFAULT_CATP_MAX_PIXELS
         if "gptq" in model_id.lower():
             from optimum.utils import is_gptqmodel_available
             if not is_gptqmodel_available():
@@ -500,7 +515,20 @@ class Qwen2VLCATPBoundingBoxCropper:
         }]
         
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) # Qwen style prompt
-        inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt").to(self.device)
+        # CATP budget: cap effective `max_pixels` via `image_processor.size["longest_edge"]` for this call only.
+        # `processor(..., images_kwargs={"max_pixels": ...})` did not shrink the grid in our Transformers/Optimum stack.
+        ip = self.processor.image_processor
+        _prev_longest = ip.size["longest_edge"]
+        try:
+            ip.size["longest_edge"] = self.catp_max_pixels
+            inputs = self.processor(
+                text=[text],
+                images=[image],
+                padding=True,
+                return_tensors="pt",
+            ).to(self.device)
+        finally:
+            ip.size["longest_edge"] = _prev_longest
 
         with torch.no_grad():
             outputs = self.model(**inputs, output_attentions=True, output_hidden_states=True,)
