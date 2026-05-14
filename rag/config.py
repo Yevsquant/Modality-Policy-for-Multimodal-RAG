@@ -3,6 +3,10 @@ from pathlib import Path
 
 @dataclass
 class RAGConfig:
+    # LMCache
+    lmcache_path: str = "/home/lmcache_storage" # change this to the path of the LMCache storage
+
+    # data
     data_root: Path = Path("data/mmdocrag")
     ann_file: Path = Path("data/mmdocrag/evaluation_15.jsonl")
     images_root: Path = Path("data/mmdocrag/images")
@@ -38,23 +42,12 @@ class RAGConfig:
     judge_api_base: str = "http://127.0.0.1:8000/v1"
     judge_model_name: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
-    # eval (None = use entire split / JSONL / official VQA file)
+    # eval
     max_examples: int | None = 50
     # MMDocRAG JSONL line indices (0-based); slice_stop is exclusive (Python slice).
     # Rows must fall in [slice_start, slice_stop) before max_examples caps length.
     eval_slice_start: int = 0
     eval_slice_stop: int | None = None
 
-    # benchmark: "mmdocrag" (JSONL) or "vqav2" (Hugging Face)
+    # benchmark: "mmdocrag" (JSONL)
     benchmark: str = "mmdocrag"
-    # Full VQAv2 val (~214k Q): set all three to local paths from visualqa.org + COCO val2014 images.
-    vqa_questions_json: Path | None = None
-    vqa_annotations_json: Path | None = None
-    vqa_coco_images_dir: Path | None = None
-    vqa_hf_dataset: str = "HuggingFaceM4/VQAv2"
-    vqa_hf_split: str = "validation"
-    vqa_hf_revision: str | None = None
-    vqa_hf_auto_fallback: bool = True
-    vqa_hf_fallback_dataset: str = "Multimodal-Fatima/VQAv2_sample_validation"
-    vqa_hf_fallback_split: str = "validation"
-    vqa_image_cache_dir: Path = Path("data/vqav2/image_cache")
