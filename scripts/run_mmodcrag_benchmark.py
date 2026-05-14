@@ -8,7 +8,7 @@ from pathlib import Path
 import psutil
 
 from rag.config import RAGConfig
-from rag.eval import run_rag_benchmark, run_rag_benchmark_offline_judge
+from rag.eval import _judged_path, run_rag_benchmark, run_rag_benchmark_offline_judge
 from rag.vllm_metrics import scrape_prometheus_metrics
 
 
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     }
 
     output_path = cfg.output_dir / "final_results_with_utilization.json"
-    judged_path = cfg.output_dir / "rag_benchmark_results_judged.json"
+    judged_path = _judged_path(cfg)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as f:
