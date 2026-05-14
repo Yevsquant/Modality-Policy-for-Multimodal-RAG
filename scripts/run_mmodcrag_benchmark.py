@@ -8,7 +8,7 @@ from pathlib import Path
 import psutil
 
 from rag.config import RAGConfig
-from rag.eval_baseline import run_baseline, run_offline_judge
+from rag.eval import run_rag_benchmark, run_rag_benchmark_offline_judge
 from rag.vllm_metrics import scrape_prometheus_metrics
 
 
@@ -99,15 +99,15 @@ def _cfg_from_args(args: argparse.Namespace) -> RAGConfig:
 
 if __name__ == "__main__":
     cfg = _cfg_from_args(_parse_args())
-    path = "/home/runying2/lmcache_storage"
+    path = RAGConfig.lmcache_path
     metrics_before = scrape_prometheus_metrics()
     host_memory_stats_before = get_host_memory_stats()
     dir_size_before = get_dir_size_gb(path)
-    baseline_results = run_baseline(cfg)
+    baseline_results = run_rag_benchmark(cfg)
     metrics_after = scrape_prometheus_metrics()
     host_memory_stats_after = get_host_memory_stats()
     dir_size_after = get_dir_size_gb(path)
-    offline_results = run_offline_judge(cfg)
+    offline_results = run_rag_benchmark_offline_judge(cfg)
 
     lmcache_payload = build_lmcache_payload(
         metrics_before, metrics_after, dir_size_before, dir_size_after
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     }
 
     output_path = cfg.output_dir / "final_results_with_utilization.json"
-    judged_path = cfg.output_dir / "baseline_results_judged.json"
+    judged_path = cfg.output_dir / "rag_benchmark_results_judged.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as f:
