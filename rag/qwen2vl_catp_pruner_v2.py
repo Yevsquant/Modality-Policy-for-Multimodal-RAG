@@ -12,7 +12,6 @@ from typing import Any, Dict, Tuple
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 IS_TOPK = True # False: Bbox Bbox works worse than topk
-IS_CLUSTER = True # False: Safe Crop
 
 # Below Qwen2-VL default chat budget (28*28*1280): CATP uses eager attention plus full
 # attentions/hidden_states, so vision patch count must stay small to avoid OOM.
@@ -478,6 +477,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         image_height: int,
         keep_ratio: float = 0.3,
         percentile_ratio: float = 0.7,
+        isCluster: bool = True,
         similarity_threshold: float = 0.98,
         max_gap: int = 1,
     ):
@@ -489,7 +489,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         selected_active_indices = self._pick_tokens(masked_importance, current_active_indices, keep_ratio, percentile_ratio)
 
         res = None
-        if IS_CLUSTER:
+        if isCluster:
             res = self._cluster_crop(selected_active_indices, merged_grid_h, merged_grid_w, image_width, image_height, max_gap)
         else:
             res = self._safe_crop(current_active_indices, selected_active_indices, merged_grid_h, merged_grid_w, image_width, image_height)
@@ -503,6 +503,7 @@ class Qwen2VLCATPBoundingBoxCropper:
         percentile_ratio: float = 0.5,
         image_cache_id: str = "example",
         tag_hash: str = "123",
+        isCluster: bool = True,
     ) -> Tuple[Image.Image, Dict[str, Any]]:
         """
         Executes CATP Attention-Based Pruning using Qwen2-VL's dynamic spatial grid.
@@ -652,6 +653,7 @@ class Qwen2VLCATPBoundingBoxCropper:
             image_height=height,
             keep_ratio=keep_ratio,
             percentile_ratio=percentile_ratio,
+            isCluster = isCluster,
         )
         true_tokens_after = bbox_info["tokens_after_bbox"]
 
