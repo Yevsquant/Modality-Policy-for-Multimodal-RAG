@@ -7,11 +7,15 @@ This repository studies **modality policy** for multimodal RAG: after hybrid tex
 
 ## Prerequisites
 
-- Linux-style environment with a **CUDA-capable NVIDIA GPU** suitable for vLLM and the pinned stack in [requirements.txt](requirements.txt).
-- Python 3 environment; install dependencies from the repo root:
+- Linux-style environment with a **CUDA-capable NVIDIA GPU** suitable for vLLM.
+- Install conda, then create the env:
+```
+conda env create -f environment.yml
+```
 
-```bash
-pip install -r requirements.txt
+Activate the env:
+```
+conda activate mrag
 ```
 
 
