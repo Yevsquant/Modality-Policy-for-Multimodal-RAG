@@ -167,5 +167,12 @@ def aggregate_summary(rows: List[Dict]) -> Dict:
         if value is not None:
             summary[f"avg_{metric_name}"] = value
 
+    tb = [r["visual_tokens"]["before"] for r in rows if r.get("visual_tokens")]
+    ta = [r["visual_tokens"]["after"] for r in rows if r.get("visual_tokens")]
+    if tb and ta:
+        summary["avg_visual_tokens_before"] = sum(tb) / len(tb)
+        summary["avg_visual_tokens_after"] = sum(ta) / len(ta)
+        summary["avg_visual_tokens_reduction_pct"] = 100.0 * (1 - sum(ta) / max(1, sum(tb)))
+
     return summary
 

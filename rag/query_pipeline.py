@@ -76,7 +76,30 @@ class RAGPipeline:
             output_dir=cfg.pruned_image_dir,
         )
         self.client = OpenAI(base_url=cfg.vlm_api_base, api_key="EMPTY")
-    
+        self._token_counter = None
+
+    def _visual_token_counter(self):
+        if self._token_counter is None:
+            from rag.visual_token_counter import VisualTokenCounter
+            self._token_counter = VisualTokenCounter(self.cfg.vlm_model_name)
+        return self._token_counter
+
+    def _count_sent_tokens(self, path: str | None) -> int:
+        """Visual tokens for the image(s) actually sent for one quote: a single
+        jpg counts once; a directory sums over its sub-image jpgs."""
+        if not path:
+            return 0
+        counter = self._visual_token_counter()
+        total = 0
+        if ".jpg" in path:
+            if Path(path).exists():
+                total += counter.count_path(path)
+        else:
+            for img_path in iter_jpgs(path):
+                if img_path.exists():
+                    total += counter.count_path(str(img_path))
+        return total
+
     def _tag_hash(self, tag: List[float]) -> str:
         quantized = ",".join(f"{float(v):.6f}" for v in tag)
         return hashlib.sha256(quantized.encode("utf-8")).hexdigest()[:12]
@@ -280,6 +303,13 @@ class RAGPipeline:
         cached_img_quotes, cache_stats = self._split_cached_images(retrieval)
         t1 = time.perf_counter()
 
+        # Capture the original image paths BEFORE pruning, since pruner.apply
+        # overwrites local_img_path with the pruned artifact.
+        original_paths = {
+            q.get("quote_id"): q.get("local_img_path")
+            for q in retrieval["selected_img_quotes"]
+        }
+
         pruned_retrieval = self.pruner.apply(example["question"], retrieval)
 
         prompt = build_prompt(example["question"], pruned_retrieval, cached_img_quotes)
@@ -315,6 +345,19 @@ class RAGPipeline:
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{encode_image(img_path)}"},
                         })
+
+        # Measure visual tokens on the TARGET model's processor: before = the
+        # original full images that got pruned this run; after = what was
+        # actually sent. Cached images counted separately (their before belongs
+        # to a previous run) so they don't distort the reduction figure.
+        tokens_before = 0
+        tokens_after = 0
+        for q in pruned_retrieval["selected_img_quotes"]:
+            tokens_before += self._count_sent_tokens(original_paths.get(q.get("quote_id")))
+            tokens_after += self._count_sent_tokens(q.get("local_img_path"))
+        from_cache_after = sum(
+            self._count_sent_tokens(q.get("local_img_path")) for q in cached_img_quotes
+        )
 
         t2 = time.perf_counter()
         stream = self.client.chat.completions.create(
@@ -390,6 +433,11 @@ class RAGPipeline:
             "selected_img_quotes": returned_selected_img_quotes,
             # **cache_stats,
             "pruning": pruned_retrieval["pruning"],
+            "visual_tokens": {
+                "before": tokens_before,
+                "after": tokens_after,
+                "from_cache_after": from_cache_after,
+            },
             "timing": {
                 "retrieval_sec": t1 - t0,
                 "request_build_sec": t2 - t1,
