@@ -16,6 +16,15 @@ import matplotlib.pyplot as plt
 
 from rag.retriever import _clip_features_to_tensor
 
+
+def _bbox_union(boxes: List[List[int]]) -> List[int]:
+    """Axis-aligned bounding box [l,t,r,b] enclosing all selected tile boxes."""
+    lefts = [b[0] for b in boxes]
+    tops = [b[1] for b in boxes]
+    rights = [b[2] for b in boxes]
+    bottoms = [b[3] for b in boxes]
+    return [min(lefts), min(tops), max(rights), max(bottoms)]
+
 # def draw_plot(layer_metrics, image_cache_id, tag_hash):
 #     df = pd.DataFrame(layer_metrics)
 
@@ -128,6 +137,7 @@ class RetrievalPruner:
     SUPPORTED_MODES = {
         "no_pruning",
         "visual_patch_pruning",
+        "clip_safecrop",
         "safecrop_pruning",
         "cluster_pruning"
     }
@@ -172,7 +182,7 @@ class RetrievalPruner:
         self.clip_processor = None
         self.clip_model = None
         self.catp_cropper = None
-        if mode == "visual_patch_pruning":
+        if mode in ("visual_patch_pruning", "clip_safecrop"):
             if not image_model_name:
                 raise ValueError(
                     "image_model_name is required for visual patch pruning modes."
@@ -206,6 +216,16 @@ class RetrievalPruner:
             visual_after = 0
             for q in img_quotes:
                 new_q, before_i, after_i = self._patch_prune_image(query, q)
+                processed.append(new_q)
+                visual_before += before_i
+                visual_after += after_i
+            pruned_images = processed
+        elif self.mode == "clip_safecrop":
+            processed = []
+            visual_before = 0
+            visual_after = 0
+            for q in img_quotes:
+                new_q, before_i, after_i = self._clip_safecrop_image(query, q)
                 processed.append(new_q)
                 visual_before += before_i
                 visual_after += after_i
@@ -288,6 +308,51 @@ class RetrievalPruner:
         q["local_img_path"] = str(pruned_path)
         q["visual_pruning"]["rendered_image_path"] = str(pruned_path)
 
+        return q, before, after
+
+    def _clip_safecrop_image(self, query: str, q: Dict) -> Tuple[Dict, int, int]:
+        img_path = q.get("local_img_path")
+        before = self.patch_grid_rows * self.patch_grid_cols
+        after = before
+        if not img_path or not Path(img_path).exists():
+            q["visual_pruning"] = {
+                "mode": self.mode,
+                "skipped": True,
+                "reason": "missing_image",
+                "tokens_before": before,
+                "tokens_after": after,
+            }
+            return q, before, after
+
+        image = Image.open(img_path).convert("RGB")
+        tiles, boxes = self._extract_grid_tiles(image)
+        scores = self._score_tiles(query, tiles)
+
+        keep_n = max(self.min_visual_tokens, int(len(tiles) * self.keep_ratio))
+        keep_n = min(max(1, keep_n), len(tiles))
+        keep_idx = np.argsort(-scores)[:keep_n].tolist()
+
+        crop_box = _bbox_union([boxes[i] for i in keep_idx])
+        cropped = image.crop(tuple(crop_box))
+        pruned_path = self._save_pruned_image(
+            image_path=Path(img_path), image=cropped, mode=self.mode, quote=q
+        )
+
+        # Rough area-ratio estimate; Phase 2 uses the target model processor for
+        # the authoritative token count.
+        area_ratio = (cropped.width * cropped.height) / max(
+            1, image.width * image.height
+        )
+        after = max(1, round(before * area_ratio))
+
+        q["local_img_path"] = str(pruned_path)
+        q["visual_pruning"] = {
+            "mode": self.mode,
+            "tokens_before": before,
+            "tokens_after": after,
+            "crop_box": crop_box,
+            "tag_hash": q.get("tag_hash"),
+        }
         return q, before, after
 
     def _catp_prune_image(self, query: str, q: Dict) -> Tuple[Dict, int, int]:

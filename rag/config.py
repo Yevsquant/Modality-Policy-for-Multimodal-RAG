@@ -22,8 +22,8 @@ class RAGConfig:
     # pruning baselines
     pruning_keep_ratio: float = 0.30
     pruning_percentile_ratio: float = 0.70
-    # {"no_pruning", "visual_patch_pruning", "safecrop_pruning", "cluster_pruning"}
-    pruning_mode: str = "safecrop_pruning"
+    # {"no_pruning", "visual_patch_pruning", "clip_safecrop", "safecrop_pruning", "cluster_pruning"}
+    pruning_mode: str = "clip_safecrop"
     patch_grid_rows: int = 4
     patch_grid_cols: int = 4
     min_visual_tokens: int = 4
