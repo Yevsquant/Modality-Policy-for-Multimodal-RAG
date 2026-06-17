@@ -32,3 +32,30 @@ def test_downscale_factor_preserves_area_ratio():
         factor = math.sqrt(keep_ratio)
         area_ratio = factor * factor
         assert abs(area_ratio - keep_ratio) < 1e-9
+
+
+def test_modes_registered():
+    from rag.pruner import RetrievalPruner
+
+    assert "clip_safecrop" in RetrievalPruner.SUPPORTED_MODES
+    assert "downscale_baseline" in RetrievalPruner.SUPPORTED_MODES
+
+
+def test_downscale_image_hits_area_budget(tmp_path):
+    from rag.pruner import RetrievalPruner
+    from PIL import Image
+
+    src = tmp_path / "src.jpg"
+    Image.new("RGB", (800, 600), color=(10, 20, 30)).save(src)
+
+    pruner = RetrievalPruner(
+        mode="downscale_baseline", keep_ratio=0.25, output_dir=str(tmp_path / "out")
+    )
+    q = {"local_img_path": str(src), "quote_id": "q", "tag_hash": "h", "image_cache_id": "src"}
+    new_q, before, after = pruner._downscale_image(q)
+
+    out = Image.open(new_q["local_img_path"])
+    area_ratio = (out.width * out.height) / (800 * 600)
+    # sqrt(0.25)=0.5 each edge -> 400x300 -> area ratio 0.25
+    assert abs(area_ratio - 0.25) < 0.01
+    assert after == round(before * 0.25)

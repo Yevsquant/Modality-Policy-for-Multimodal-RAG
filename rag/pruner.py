@@ -138,6 +138,7 @@ class RetrievalPruner:
         "no_pruning",
         "visual_patch_pruning",
         "clip_safecrop",
+        "downscale_baseline",
         "safecrop_pruning",
         "cluster_pruning"
     }
@@ -226,6 +227,16 @@ class RetrievalPruner:
             visual_after = 0
             for q in img_quotes:
                 new_q, before_i, after_i = self._clip_safecrop_image(query, q)
+                processed.append(new_q)
+                visual_before += before_i
+                visual_after += after_i
+            pruned_images = processed
+        elif self.mode == "downscale_baseline":
+            processed = []
+            visual_before = 0
+            visual_after = 0
+            for q in img_quotes:
+                new_q, before_i, after_i = self._downscale_image(q)
                 processed.append(new_q)
                 visual_before += before_i
                 visual_after += after_i
@@ -351,6 +362,39 @@ class RetrievalPruner:
             "tokens_before": before,
             "tokens_after": after,
             "crop_box": crop_box,
+            "tag_hash": q.get("tag_hash"),
+        }
+        return q, before, after
+
+    def _downscale_image(self, q: Dict) -> Tuple[Dict, int, int]:
+        """Mediocre baseline: query-agnostic uniform downscale to the same token
+        budget as the crop. Visual tokens scale ~ pixel area, so a linear edge
+        factor of sqrt(keep_ratio) hits ~keep_ratio of the tokens."""
+        img_path = q.get("local_img_path")
+        before = self.patch_grid_rows * self.patch_grid_cols
+        if not img_path or not Path(img_path).exists():
+            q["visual_pruning"] = {
+                "mode": self.mode,
+                "skipped": True,
+                "reason": "missing_image",
+                "tokens_before": before,
+                "tokens_after": before,
+            }
+            return q, before, before
+
+        image = Image.open(img_path).convert("RGB")
+        factor = math.sqrt(self.keep_ratio)
+        new_size = (max(1, int(image.width * factor)), max(1, int(image.height * factor)))
+        resized = image.resize(new_size)
+        pruned_path = self._save_pruned_image(
+            image_path=Path(img_path), image=resized, mode=self.mode, quote=q
+        )
+        after = max(1, round(before * self.keep_ratio))
+        q["local_img_path"] = str(pruned_path)
+        q["visual_pruning"] = {
+            "mode": self.mode,
+            "tokens_before": before,
+            "tokens_after": after,
             "tag_hash": q.get("tag_hash"),
         }
         return q, before, after
