@@ -37,9 +37,75 @@ def test_downscale_factor_preserves_area_ratio():
 def test_modes_registered():
     from rag.pruner import RetrievalPruner
 
-    assert "clip_safecrop" in RetrievalPruner.SUPPORTED_MODES
-    assert "downscale_baseline" in RetrievalPruner.SUPPORTED_MODES
-    assert "clip_safecrop_downscale" in RetrievalPruner.SUPPORTED_MODES
+    for m in (
+        "clip_safecrop",
+        "downscale_baseline",
+        "clip_safecrop_downscale",
+        "trim_downscale",
+        "density_adaptive_downscale",
+        "relevance_adaptive_downscale",
+    ):
+        assert m in RetrievalPruner.SUPPORTED_MODES
+
+
+def test_trim_bbox_finds_content():
+    from rag.pruner import _trim_bbox
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (100, 100), (255, 255, 255))
+    ImageDraw.Draw(img).rectangle([30, 20, 70, 60], fill=(0, 0, 0))
+    box = _trim_bbox(img)
+    # bbox should tightly enclose the black rectangle (inclusive/exclusive slack 1px)
+    assert box is not None
+    l, t, r, b = box
+    assert 29 <= l <= 31 and 19 <= t <= 21
+    assert 70 <= r <= 72 and 60 <= b <= 62
+
+
+def test_trim_bbox_uniform_returns_none():
+    from rag.pruner import _trim_bbox
+    from PIL import Image
+
+    assert _trim_bbox(Image.new("RGB", (50, 50), (255, 255, 255))) is None
+
+
+def test_detail_density_ordering():
+    from rag.pruner import _detail_density
+    from PIL import Image
+    import numpy as np
+
+    flat = Image.new("RGB", (128, 128), (128, 128, 128))
+    noise = Image.fromarray((np.random.rand(128, 128, 3) * 255).astype("uint8"))
+    df = _detail_density(flat)
+    dn = _detail_density(noise)
+    assert 0.0 <= df <= 1.0 and 0.0 <= dn <= 1.0
+    assert df < 0.05 < dn
+
+
+def test_density_to_keep_ratio_monotonic():
+    from rag.pruner import _density_to_keep_ratio
+
+    lo = _density_to_keep_ratio(0.0, base_keep=0.3)
+    hi = _density_to_keep_ratio(1.0, base_keep=0.3)
+    mid = _density_to_keep_ratio(0.5, base_keep=0.3)
+    assert lo < mid < hi
+    assert abs(lo - 0.3 * 0.5) < 1e-9          # density 0 -> base*lo_mult
+    assert hi <= 1.0                            # clamped to max_keep
+    assert abs(hi - min(1.0, 0.3 * 2.0)) < 1e-9
+
+
+def test_relevance_keep_ratios_equal_and_ordered():
+    from rag.pruner import _relevance_keep_ratios
+
+    # Equal relevances -> everyone gets the base budget (mean preserved).
+    eq = _relevance_keep_ratios([0.2, 0.2], base_keep=0.3)
+    assert abs(eq[0] - 0.3) < 1e-6 and abs(eq[1] - 0.3) < 1e-6
+    # Single image -> base budget.
+    one = _relevance_keep_ratios([0.25], base_keep=0.3)
+    assert abs(one[0] - 0.3) < 1e-6
+    # More relevant image gets a larger budget.
+    krs = _relevance_keep_ratios([0.4, 0.1], base_keep=0.3)
+    assert krs[0] > krs[1]
 
 
 def test_area_budget_factor():

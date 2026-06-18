@@ -133,9 +133,14 @@ class QuoteRetriever:
             if len(valid_idx) > 0 and len(img_embs) > 0:
                 local_topk = self._topk(query_img_emb, img_embs, min(image_top_k, len(valid_idx)))
                 selected_images = []
+                q_unit = self._normalize_vector(query_img_emb)
                 for i in local_topk:
                     item = dict(img_quotes[valid_idx[i]])
                     item["tag"] = self._image_conditioned_clip_tag(query_img_emb, img_embs[i])
+                    # Reuse the already-computed CLIP embeddings for a scalar
+                    # query<->image relevance (no extra forward); consumed by the
+                    # relevance_adaptive_downscale pruning mode.
+                    item["clip_relevance"] = float(q_unit @ self._normalize_vector(img_embs[i]))
                     selected_images.append(item)
 
         return {
