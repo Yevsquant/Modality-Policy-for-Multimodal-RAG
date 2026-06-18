@@ -25,6 +25,16 @@ def _bbox_union(boxes: List[List[int]]) -> List[int]:
     bottoms = [b[3] for b in boxes]
     return [min(lefts), min(tops), max(rights), max(bottoms)]
 
+
+def _area_budget_factor(crop_area: float, full_area: float, keep_ratio: float) -> float:
+    """Linear resize factor (<=1) so the crop's area is downscaled to a token
+    budget of keep_ratio * full_area. Returns 1.0 when the crop is already within
+    budget (never upscales). Visual tokens scale ~ pixel area."""
+    target = keep_ratio * full_area
+    if crop_area <= target:
+        return 1.0
+    return math.sqrt(target / crop_area)
+
 # def draw_plot(layer_metrics, image_cache_id, tag_hash):
 #     df = pd.DataFrame(layer_metrics)
 
@@ -138,6 +148,7 @@ class RetrievalPruner:
         "no_pruning",
         "visual_patch_pruning",
         "clip_safecrop",
+        "clip_safecrop_downscale",
         "downscale_baseline",
         "safecrop_pruning",
         "cluster_pruning"
@@ -183,7 +194,7 @@ class RetrievalPruner:
         self.clip_processor = None
         self.clip_model = None
         self.catp_cropper = None
-        if mode in ("visual_patch_pruning", "clip_safecrop"):
+        if mode in ("visual_patch_pruning", "clip_safecrop", "clip_safecrop_downscale"):
             if not image_model_name:
                 raise ValueError(
                     "image_model_name is required for visual patch pruning modes."
@@ -227,6 +238,16 @@ class RetrievalPruner:
             visual_after = 0
             for q in img_quotes:
                 new_q, before_i, after_i = self._clip_safecrop_image(query, q)
+                processed.append(new_q)
+                visual_before += before_i
+                visual_after += after_i
+            pruned_images = processed
+        elif self.mode == "clip_safecrop_downscale":
+            processed = []
+            visual_before = 0
+            visual_after = 0
+            for q in img_quotes:
+                new_q, before_i, after_i = self._hybrid_crop_downscale_image(query, q)
                 processed.append(new_q)
                 visual_before += before_i
                 visual_after += after_i
@@ -395,6 +416,59 @@ class RetrievalPruner:
             "mode": self.mode,
             "tokens_before": before,
             "tokens_after": after,
+            "tag_hash": q.get("tag_hash"),
+        }
+        return q, before, after
+
+    def _hybrid_crop_downscale_image(self, query: str, q: Dict) -> Tuple[Dict, int, int]:
+        """Query-aware crop to the relevant bounding box, THEN uniformly downscale
+        that crop to the same ~keep_ratio token budget as downscale_baseline. This
+        lifts clip_safecrop's token floor (its single bbox stays large on scattered
+        content) while keeping the crop focused on the query-relevant region."""
+        img_path = q.get("local_img_path")
+        before = self.patch_grid_rows * self.patch_grid_cols
+        after = before
+        if not img_path or not Path(img_path).exists():
+            q["visual_pruning"] = {
+                "mode": self.mode,
+                "skipped": True,
+                "reason": "missing_image",
+                "tokens_before": before,
+                "tokens_after": after,
+            }
+            return q, before, after
+
+        image = Image.open(img_path).convert("RGB")
+        tiles, boxes = self._extract_grid_tiles(image)
+        scores = self._score_tiles(query, tiles)
+
+        keep_n = max(self.min_visual_tokens, int(len(tiles) * self.keep_ratio))
+        keep_n = min(max(1, keep_n), len(tiles))
+        keep_idx = np.argsort(-scores)[:keep_n].tolist()
+
+        crop_box = _bbox_union([boxes[i] for i in keep_idx])
+        cropped = image.crop(tuple(crop_box))
+
+        full_area = image.width * image.height
+        factor = _area_budget_factor(cropped.width * cropped.height, full_area, self.keep_ratio)
+        if factor < 1.0:
+            new_size = (max(1, int(cropped.width * factor)), max(1, int(cropped.height * factor)))
+            cropped = cropped.resize(new_size)
+
+        pruned_path = self._save_pruned_image(
+            image_path=Path(img_path), image=cropped, mode=self.mode, quote=q
+        )
+
+        area_ratio = (cropped.width * cropped.height) / max(1, full_area)
+        after = max(1, round(before * area_ratio))
+
+        q["local_img_path"] = str(pruned_path)
+        q["visual_pruning"] = {
+            "mode": self.mode,
+            "tokens_before": before,
+            "tokens_after": after,
+            "crop_box": crop_box,
+            "downscale_factor": factor,
             "tag_hash": q.get("tag_hash"),
         }
         return q, before, after

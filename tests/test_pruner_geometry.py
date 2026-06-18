@@ -39,6 +39,21 @@ def test_modes_registered():
 
     assert "clip_safecrop" in RetrievalPruner.SUPPORTED_MODES
     assert "downscale_baseline" in RetrievalPruner.SUPPORTED_MODES
+    assert "clip_safecrop_downscale" in RetrievalPruner.SUPPORTED_MODES
+
+
+def test_area_budget_factor():
+    from rag.pruner import _area_budget_factor
+
+    # Crop already within budget -> no downscale (factor 1.0).
+    assert _area_budget_factor(crop_area=100, full_area=1000, keep_ratio=0.3) == 1.0
+    # Crop larger than budget -> shrink so crop_area*factor**2 == target.
+    f = _area_budget_factor(crop_area=800, full_area=1000, keep_ratio=0.3)
+    assert abs((800 * f * f) - (0.3 * 1000)) < 1e-6
+    assert 0.0 < f < 1.0
+    # Full-image crop at keep_ratio -> matches the downscale_baseline factor sqrt(kr).
+    f_full = _area_budget_factor(crop_area=1000, full_area=1000, keep_ratio=0.25)
+    assert abs(f_full - math.sqrt(0.25)) < 1e-9
 
 
 def test_downscale_image_hits_area_budget(tmp_path):

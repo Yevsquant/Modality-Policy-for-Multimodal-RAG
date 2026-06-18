@@ -1,8 +1,47 @@
 import json
 import re
 from collections import Counter
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+import numpy as np
 from openai import OpenAI
+
+
+def bootstrap_ci(
+    values: Sequence[float],
+    n_boot: int = 10000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Bootstrap (mean, lo, hi) for the mean of `values` at confidence 1-alpha.
+
+    Returns (None, None, None) for empty input. With a single distinct value the
+    interval collapses to that value.
+    """
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size == 0:
+        return (None, None, None)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, arr.size, size=(n_boot, arr.size))
+    means = arr[idx].mean(axis=1)
+    lo = float(np.percentile(means, 100 * alpha / 2))
+    hi = float(np.percentile(means, 100 * (1 - alpha / 2)))
+    return (float(arr.mean()), lo, hi)
+
+
+def paired_diff_ci(
+    values_a: Sequence[float],
+    values_b: Sequence[float],
+    n_boot: int = 10000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Bootstrap (mean, lo, hi) of the paired difference a-b (same examples, in
+    order). A CI that excludes 0 means the methods differ significantly."""
+    a = np.asarray(list(values_a), dtype=float)
+    b = np.asarray(list(values_b), dtype=float)
+    if a.size != b.size:
+        raise ValueError("paired_diff_ci requires equal-length aligned inputs.")
+    return bootstrap_ci(a - b, n_boot=n_boot, alpha=alpha, seed=seed)
 
 JUDGE_PROMPT = """
     You are evaluating a multimodal RAG system output.
@@ -166,6 +205,12 @@ def aggregate_summary(rows: List[Dict]) -> Dict:
         value = avg_metric(metric_name)
         if value is not None:
             summary[f"avg_{metric_name}"] = value
+
+    jc = [r["metrics"]["judge_correct"] for r in rows if "judge_correct" in r.get("metrics", {})]
+    if jc:
+        _, lo, hi = bootstrap_ci(jc)
+        summary["avg_judge_correct_ci_low"] = lo
+        summary["avg_judge_correct_ci_high"] = hi
 
     tb = [r["visual_tokens"]["before"] for r in rows if r.get("visual_tokens")]
     ta = [r["visual_tokens"]["after"] for r in rows if r.get("visual_tokens")]
