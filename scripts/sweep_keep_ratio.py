@@ -43,9 +43,22 @@ def run_sweep(args):
     from rag.config import RAGConfig
     from rag.eval import run_rag_benchmark, run_rag_benchmark_offline_judge
 
+    SWEEP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Resume: load any points already completed so a server death mid-sweep does
+    # not lose finished work; completed (mode, keep_ratio) points are skipped.
     results = []
+    if SWEEP_PATH.exists():
+        try:
+            results = json.loads(SWEEP_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            results = []
+    done = {(r["mode"], r["keep_ratio"]) for r in results}
+
     for mode in args.modes:
         for keep_ratio in args.keep_ratios:
+            if (mode, keep_ratio) in done:
+                print(f"\n=== skip (already done) mode={mode} keep_ratio={keep_ratio} ===")
+                continue
             cfg = RAGConfig()
             cfg.pruning_mode = mode
             cfg.pruning_keep_ratio = keep_ratio
@@ -70,10 +83,11 @@ def run_sweep(args):
                 "avg_judge_score": summary.get("avg_judge_score"),
                 "avg_total_sec": summary.get("avg_total_sec"),
             })
+            # Persist after every point so partial results survive a crash.
+            SWEEP_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            print(f"  wrote {len(results)} point(s) -> {SWEEP_PATH}")
 
-    SWEEP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SWEEP_PATH.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print(f"\nwrote {SWEEP_PATH}")
+    print(f"\nsweep complete: {len(results)} point(s) in {SWEEP_PATH}")
     return results
 
 
