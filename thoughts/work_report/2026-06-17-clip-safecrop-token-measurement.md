@@ -1,6 +1,6 @@
 # Work Report: CLIP-Safecrop + Real Visual-Token Measurement
 
-**Date:** 2026-06-17
+**Date:** 2026-06-17 (implementation); 2026-06-18 (benchmark run)
 **Branch:** `clip-safecrop-token-measurement`
 **Plan:** [thoughts/plans/2026-06-17-clip-safecrop-and-token-measurement.md](../plans/2026-06-17-clip-safecrop-and-token-measurement.md)
 **Method:** TDD (red → green → commit), one commit per phase.
@@ -119,3 +119,34 @@ relevant bbox *then* downscale that crop to a token budget.
   setting `pruning_mode = "safecrop_pruning"`.
 - When switching modes, clear `image_prune_cache.json` + `pruned_images/` to avoid
   mixing artifacts from different modes (per plan's Migration Notes).
+
+## Operational traps hit during benchmarking (and how they were handled)
+
+- **Prune-cache contaminated the first cross-mode control.** The on-disk
+  `image_prune_cache.json` is keyed by `image_cache_id` + query tag, NOT pruning
+  mode, so the first `no_pruning` control reused clip_safecrop's cached crops and
+  reported `avg_visual_tokens_before=0.0`. Fix: rerun controls with
+  `image_prune_cache_enabled=False`. The clean control gave the true 0.36 ceiling.
+- **~60-min background-task reaper killed the vLLM server twice mid-sweep**, losing
+  all sweep progress (it wrote JSON only at the end). Fixes: (a) made
+  `sweep_keep_ratio.py` write incrementally + resume (commit `6e1ebc8`); (b) ran the
+  server and sweep **detached** via `nohup setsid` so they outlive the reaper.
+- **Orphaned GPU memory:** hard-killed engines left ~63 GB allocated with no process
+  attached; reclaiming needs a GPU reset (not performed unprompted).
+
+## Artifacts produced
+
+- Figures: `imgs/VisualTokensByMethods.png`, `imgs/TokenVsAccuracy.png`.
+- Sweep data: `data/mmdocrag/analysis/keep_ratio_sweep.json` (12 points).
+- Judged results (gitignored): `baseline_results_judged_clip_safecrop.json`,
+  `baseline_results_judged_no_pruning_clean.json`.
+
+## Bottom line
+
+The implementation meets the plan (cheap CLIP signal, layout-preserving single crop,
+real target-model token measurement, honest baseline + sweep). But the measurement it
+enabled is **negative for the method**: on MMDocRAG slice [0,50), query-agnostic
+downscaling Pareto-dominates clip_safecrop — fewer tokens at equal/better accuracy and
+~2× faster — because clip_safecrop's single-bbox token-after floors at ~1042 (~65% of
+the full image) on spatially-scattered content. The value delivered here is the honest
+measurement apparatus that surfaces this, not a win for the crop method.
