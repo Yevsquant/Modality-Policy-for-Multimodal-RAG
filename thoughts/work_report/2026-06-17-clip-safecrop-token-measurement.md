@@ -62,16 +62,54 @@ sweep to produce a token-vs-accuracy tradeoff curve.
   counts — 1280×960→1200, 640×480→300, 320×240→80 tokens.
 - **downscale_baseline functional:** 800×600 → 400×300 (exactly keep_ratio=0.25 area).
 
-## Not yet done — requires dataset + running vLLM server (the plan's Manual Verification)
+## Benchmark results (run 2026-06-18, slice [0,50), Qwen3-Omni-30B via vLLM)
 
-`data/` is empty (download script not run) and no vLLM server is up. Remaining:
-1. `bash scripts/download_mmdocrag.sh`.
-2. Serve Qwen3-Omni-30B via vLLM (README command, Terminal 1).
-3. Run `clip_safecrop` benchmark; confirm `avg_visual_tokens_reduction_pct > 0` and
-   `avg_total_sec` below the 7B `safecrop_pruning` baseline.
-4. Generate `imgs/VisualTokensByMethods.png` (plot script) and run
-   `scripts/sweep_keep_ratio.py` → `imgs/TokenVsAccuracy.png`; read off the keep_ratio
-   "knee".
+All token figures measured with the target model's processor (`VisualTokenCounter`).
+
+**Headline single-point comparison:**
+
+| method | visual tokens | judge_correct | judge_score | total_sec |
+|---|---|---|---|---|
+| no_pruning (clean, cache off) | 1715 → 1715 | 0.36 | 2.10 | 10.0 |
+| clip_safecrop (keep=0.3) | 1605 → **975** | 0.32 | 1.80 | 6.05 |
+
+clip_safecrop's 0.32 is **not a regression** — the full-image ceiling is only 0.36.
+The slice is hard (retrieval_recall ~0.49 caps everyone; judge marks ~16–18/50
+correct even with full images). So pruning costs ~0.04 accuracy for ~43% fewer
+tokens and ~40% lower latency.
+
+**keep_ratio sweep — clip_safecrop vs downscale_baseline** (`imgs/TokenVsAccuracy.png`,
+`data/mmdocrag/analysis/keep_ratio_sweep.json`):
+
+| keep | clip_safecrop tok / correct | downscale tok / correct |
+|---|---|---|
+| 0.1 | 1042 / 0.32 | 170 / 0.28 |
+| 0.2 | 1042 / 0.30 | 343 / 0.24 |
+| 0.3 | 1042 / 0.32 | 512 / 0.32 |
+| 0.4 | 1463 / 0.28 | 687 / 0.30 |
+| 0.5 | 1622 / 0.34 | 857 / 0.36 |
+| 0.7 | 1686 / 0.32 | 1200 / 0.28 |
+
+**Key (honest, partly negative) conclusion:** the mediocre baseline **wins**. Plain
+uniform downscaling is Pareto-superior to query-aware clip_safecrop on this slice —
+at equal-or-better accuracy it uses far fewer tokens (e.g. downscale keep=0.3 = 512
+tok @ 0.32 vs clip_safecrop's best ~1042 tok @ 0.32; downscale keep=0.5 = 857 tok @
+0.36 matches the full-image accuracy ceiling), and runs ~2x faster (~4.5s vs ~8.5s).
+
+**Why clip_safecrop is dominated:** its token-after **floors at ~1042** (≈65% of the
+full image) and never drops further, because the single bounding-box union of the
+top-scored tiles stays large whenever relevant content is spatially scattered (and
+`min_visual_tokens=4` keeps ≥4 tiles). So the layout-preserving single-crop design
+caps the achievable token reduction at ~35%, while downscaling scales smoothly down
+to ~10% of tokens. Accuracy is essentially flat (0.24–0.36, within judge noise)
+across all 12 points — no method improves answers; the only real lever is tokens,
+and downscaling pulls it harder.
+
+**Implications worth discussing:** (1) For this dataset, a query-agnostic downscale
+is the stronger, simpler token-reduction lever. (2) clip_safecrop might still win
+where relevant content is spatially *concentrated* (its bbox would shrink) — this
+slice doesn't exhibit that. (3) A natural follow-up is a hybrid: crop to the
+relevant bbox *then* downscale that crop to a token budget.
 
 ## Notes / decisions
 
