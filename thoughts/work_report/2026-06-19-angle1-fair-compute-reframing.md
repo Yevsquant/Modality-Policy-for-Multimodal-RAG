@@ -68,13 +68,43 @@ and owns the low-compute regime. This rehabilitates pre-processing: it is *not* 
 once measured fairly — vindicating Angle 1, even though Angle 2 (single-shot crop) failed to
 add spatial smarts on top.
 
-**Caveats (honest):** this is an analytical FLOPs estimate, not measured latency — real
-latency depends on kernel/GPU utilization (the ViT's O(V²) attention may be more or less
-efficient than the LLM's), and the GPTQ-Int4 weights change the arithmetic mix. The
-*direction* (FastV pays a large fixed vision cost downscale avoids) is robust to these; the
-exact crossover is not. A measured-latency confirmation on the 7B is the natural follow-up.
+**Caveat:** analytical FLOPs ≠ latency. Confirmed below with measured wall-clock.
+
+## Measured-latency confirmation (Qwen2-VL-7B GPTQ-Int4, single H-class GPU)
+
+`scripts/angle1_measure_latency.py` times two primitives on the real model (CUDA-synced,
+5 warmup + median of 20 trials) and composes each condition exactly as the FLOPs model
+does: `t_vision(P)` (vision tower) and `per_layer(L)` (28-layer stack / 28); FastV =
+3 full layers + 25 pruned layers. lm_head/embedding excluded (small, constant). Composing
+measured primitives — rather than timing the 2-pass `answer_mc` — avoids double-counting
+FastV's early layers.
+
+| condition | acc | vision ms | LLM ms | total ms | vision % |
+|---|---|---|---|---|---|
+| ds0.25 | 0.476 | 11.8 | 28.2 | 39.9 | 29 |
+| ds0.3 | 0.518 | 12.6 | 28.9 | 41.5 | 30 |
+| ds0.5 | 0.550 | 19.7 | 33.5 | 53.2 | 37 |
+| full+fastv0.25 | 0.576 | 36.8 | 30.1 | 66.9 | 55 |
+| full+fastv0.5 | 0.602 | 36.8 | 35.2 | 71.9 | 51 |
+| full | 0.607 | 36.8 | 48.7 | 85.4 | 43 |
+
+The vision tower is a **constant 36.8 ms** for every full-res FastV condition and is
+**51–55%** of their latency — FastV cannot touch it. Matched-latency advantage of FastV
+over input-downscale (interpolated downscale frontier):
+
+| FastV point | latency | FastV acc | downscale acc @ same latency | advantage |
+|---|---|---|---|---|
+| full+fastv0.25 | 66.9 ms | 0.576 | 0.574 | **+0.002** |
+| full+fastv0.5 | 71.9 ms | 0.602 | 0.583 | **+0.019** |
+
+**Three convergent axes** for FastV's advantage over input-downscale: deep-tokens +0.099/
++0.052 → analytical FLOPs +0.015/+0.026 → **measured latency +0.002/+0.019**. At the
+aggressive r=0.25 operating point FastV's edge is **statistically and practically zero**
+on real latency. The deep-token framing overstated FastV ~25–50×. Confirmed: the "FastV
+beats input-downscale" result was an artifact of an axis that ignores the vision encoder.
 
 ## Artifacts
 
-- `rag/flops_model.py` (+ `tests/test_flops_model.py`), `scripts/angle1_flops_reframing.py`
-- `data/vqa_stress/angle1_flops.json`, `imgs/Angle1FlopsFrontier.png`
+- `rag/flops_model.py` (+ `tests/test_flops_model.py`), `scripts/angle1_flops_reframing.py`,
+  `scripts/angle1_measure_latency.py`
+- `data/vqa_stress/angle1_flops.json`, `data/vqa_stress/angle1_latency.json`, `imgs/Angle1FlopsFrontier.png`
