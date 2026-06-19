@@ -75,7 +75,8 @@ def _load_done(out: Path) -> set:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", required=True, choices=["vstar", "docvqa"])
+    ap.add_argument("--dataset", required=True,
+                    choices=["vstar", "docvqa", "hrbench", "hrbench4k", "hrbench8k"])
     ap.add_argument("--transform", default="downscale", choices=["downscale", "trim_downscale"])
     ap.add_argument("--keep-ratios", default="1.0,0.5,0.3,0.2,0.1")
     ap.add_argument("--limit", type=int, default=0, help="0 = all examples")

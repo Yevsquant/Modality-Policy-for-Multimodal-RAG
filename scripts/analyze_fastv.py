@@ -36,7 +36,8 @@ def main():
             ids.add(r["id"])
 
     conds = ["full", "full+fastv0.5", "full+fastv0.25",
-             "ds0.3", "ds0.3+fastv0.5", "ds0.3+fastv0.25"]
+             "ds0.3", "ds0.3+fastv0.5", "ds0.3+fastv0.25",
+             "ds0.5", "ds0.25"]
     conds = [c for c in conds if c in score]
     common = sorted(i for i in ids if all(i in score[c] for c in conds))
 
@@ -62,6 +63,12 @@ def main():
         "downscale_effect_no_fastv": paired("ds0.3", "full"),
         "stacked_vs_full": paired("ds0.3+fastv0.5", "full"),
     }
+    # Goal C: FastV vs input-downscale at MATCHED token budgets (the better lever?).
+    # ~509 tok: full+fastv0.5 vs ds0.5 ; ~255 tok: full+fastv0.25 vs ds0.25.
+    if "ds0.5" in score:
+        tests["matched509_fastv_vs_downscale"] = paired("full+fastv0.5", "ds0.5")
+    if "ds0.25" in score:
+        tests["matched255_fastv_vs_downscale"] = paired("full+fastv0.25", "ds0.25")
 
     report = {"n_common": len(common), "per_cond": per_cond, "paired_tests": tests}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

@@ -28,7 +28,11 @@ from typing import Dict, List
 
 import numpy as np
 
-from rag.budget_features import ClipFeaturizer
+from rag.budget_features import (
+    SPATIAL_FEATURE_NAMES,
+    ClipFeaturizer,
+    SpatialClipFeaturizer,
+)
 from rag.budget_policy import (
     oracle_budget,
     oracle_frontier_point,
@@ -36,7 +40,7 @@ from rag.budget_policy import (
     static_frontier,
 )
 from rag.metrics import bootstrap_ci, paired_diff_ci
-from rag.vqa_datasets import load_vstar
+from rag.vqa_datasets import load_dataset_by_name, load_vstar
 
 
 def load_stress(path: str):
@@ -91,6 +95,24 @@ def out_of_fold_probs(
     return oof
 
 
+def out_of_fold_auc(oof: Dict[float, np.ndarray], y_by_keep, keeps):
+    """OOF ROC-AUC per budget — the decisive "can features predict survival?" number.
+
+    Degenerate budgets (one class only) have undefined AUC -> reported as None.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    out = {}
+    for k in keeps:
+        y = y_by_keep[k]
+        base = float(y.mean())
+        if len(np.unique(y)) < 2:
+            out[k] = {"auc": None, "base_rate": base}
+        else:
+            out[k] = {"auc": float(roc_auc_score(y, oof[k])), "base_rate": base}
+    return out
+
+
 def ci_str(triple):
     m, lo, hi = triple
     return f"{m:.3f} [{lo:.3f}, {hi:.3f}]"
@@ -102,14 +124,24 @@ def main():
     ap.add_argument("--out", default="data/vqa_stress/vstar_policy.json")
     ap.add_argument("--plot", default="imgs/Phase2LearnedBudgetFrontier.png")
     ap.add_argument("--cache-features", default="data/vqa_stress/vstar_clip_feats.npz")
+    ap.add_argument(
+        "--featurizer", choices=["pooled", "spatial", "both"], default="pooled",
+        help="pooled=Phase2 CLIP img+txt+cos; spatial=Phase4 patch-grid relevance "
+             "+ detail + resolution; both=concat.",
+    )
+    ap.add_argument(
+        "--dataset", default="vstar",
+        help="dataset name for resolving image paths/questions (vstar|docvqa|hrbench).",
+    )
     args = ap.parse_args()
 
     ids, keeps, scores, tokens = load_stress(args.stress)
     print(f"[data] {len(ids)} examples, keeps (cheap->expensive) = {keeps}")
+    print(f"[featurizer] {args.featurizer}  dataset={args.dataset}")
 
     # --- features (cached; CLIP forward is the only GPU work and it's tiny) ---
     cache = Path(args.cache_features)
-    recs = {r["id"]: r for r in load_vstar()}
+    recs = {r["id"]: r for r in load_dataset_by_name(args.dataset)}
     if cache.exists():
         npz = np.load(cache, allow_pickle=True)
         feat_ids = list(npz["ids"])
@@ -120,13 +152,17 @@ def main():
         present = [i for i in ids if i in recs]
         paths = [recs[i]["image_path"] for i in present]
         qs = [recs[i]["question"] for i in present]
-        print(f"[features] extracting CLIP for {len(present)} examples ...")
-        fez = ClipFeaturizer()
-        X = fez.features(paths, qs)
+        print(f"[features] extracting {args.featurizer} CLIP for {len(present)} ...")
+        parts = []
+        if args.featurizer in ("pooled", "both"):
+            parts.append(ClipFeaturizer().features(paths, qs))
+        if args.featurizer in ("spatial", "both"):
+            parts.append(SpatialClipFeaturizer().features(paths, qs))
+        X = np.concatenate(parts, axis=1).astype("float32")
         feat_map = {i: X[j] for j, i in enumerate(present)}
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache, ids=np.array(present), X=X)
-        print(f"[features] cached -> {cache}")
+        print(f"[features] cached -> {cache}  dim={X.shape[1]}")
 
     ids = [i for i in ids if i in feat_map]
     X = np.stack([feat_map[i] for i in ids]).astype("float32")
@@ -135,6 +171,12 @@ def main():
 
     y_by_keep = {k: np.array([scores[i][k] for i in ids]) for k in keeps}
     oof = out_of_fold_probs(X, y_by_keep, keeps)
+    auc = out_of_fold_auc(oof, y_by_keep, keeps)
+    print("\n=== Out-of-fold AUC per budget (does it beat ~0.50?) ===")
+    for k in keeps:
+        a = auc[k]["auc"]
+        print(f"  keep={k:<4} base_rate={auc[k]['base_rate']:.3f}  "
+              f"AUC={'n/a' if a is None else f'{a:.3f}'}")
 
     # --- assemble per-example records for the policy logic ---
     examples = [
@@ -207,9 +249,14 @@ def main():
 
     report = {
         "stress_file": args.stress,
+        "featurizer": args.featurizer,
+        "dataset": args.dataset,
         "n": n,
         "feature_dim": int(X.shape[1]),
         "keeps_cheap_first": keeps,
+        "oof_auc_per_budget": {
+            str(k): auc[k] for k in keeps
+        },
         "static_frontier": [
             {"keep": k, "acc": a, "tokens": tk} for k, a, tk in static
         ],

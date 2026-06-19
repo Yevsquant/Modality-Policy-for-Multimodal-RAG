@@ -82,9 +82,66 @@ def load_docvqa(limit: Optional[int] = 300, seed: int = 0) -> List[dict]:
     return records
 
 
+_MC_INSTRUCTION = "Answer with the option's letter from the given choices directly."
+
+
+def load_hrbench(
+    version: str = "4k", limit: Optional[int] = 300, seed: int = 0
+) -> List[dict]:
+    """HR-Bench (DreamMr/HR-Bench): true 4K/8K images, multiple-choice (A-D).
+
+    A high-resolution MC benchmark — like V*Bench but larger (800/version) and
+    higher-res, so downscaling should provably hurt. Reuses `vqa_scoring.mc_score`.
+    Images are base64-JPEG in the HF rows; we materialize them to disk once (the VLM
+    client and token counter both consume file paths), matching the DocVQA loader.
+    """
+    import base64
+    import io
+    import random
+
+    from datasets import load_dataset
+    from PIL import Image
+
+    split = f"hrbench_{version}"
+    img_dir = Path(f"data/vqa_stress/hrbench_{version}_images")
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    ds = load_dataset("DreamMr/HR-Bench", "hrbench_version_split")[split]
+    idx = list(range(len(ds)))
+    random.Random(seed).shuffle(idx)
+    if limit:
+        idx = idx[:limit]
+
+    records = []
+    for i in idx:
+        ex = ds[i]
+        qid = str(ex["index"])
+        img_path = img_dir / f"{qid}.jpg"
+        if not img_path.exists():
+            img = Image.open(io.BytesIO(base64.b64decode(ex["image"]))).convert("RGB")
+            img.save(img_path, "JPEG", quality=95)
+        opts = "\n".join(f"({L}) {ex[L]}" for L in ("A", "B", "C", "D"))
+        question = f"{ex['question'].strip()}\n{opts}\n{_MC_INSTRUCTION}"
+        records.append(
+            {
+                "id": f"hrbench{version}-{qid}",
+                "image_path": str(img_path),
+                "question": question,
+                "task": "mc",
+                "gold": str(ex["answer"]).strip().upper(),
+                "category": ex["category"],
+            }
+        )
+    return records
+
+
 def load_dataset_by_name(name: str, limit: Optional[int] = None) -> List[dict]:
     if name == "vstar":
         return load_vstar(limit=limit)
     if name == "docvqa":
         return load_docvqa(limit=limit if limit else 300)
+    if name in ("hrbench", "hrbench4k"):
+        return load_hrbench("4k", limit=limit if limit else 300)
+    if name == "hrbench8k":
+        return load_hrbench("8k", limit=limit if limit else 300)
     raise ValueError(f"unknown dataset: {name}")

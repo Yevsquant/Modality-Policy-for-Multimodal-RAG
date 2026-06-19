@@ -29,6 +29,11 @@ CONDITIONS = [
     {"name": "ds0.3",           "input_keep": 0.3, "fastv_layer": None, "keep_ratio": 1.0},
     {"name": "ds0.3+fastv0.5",  "input_keep": 0.3, "fastv_layer": 3,    "keep_ratio": 0.5},
     {"name": "ds0.3+fastv0.25", "input_keep": 0.3, "fastv_layer": 3,    "keep_ratio": 0.25},
+    # Phase 4: downscale conditions at the SAME token budgets as the FastV ones, so
+    # FastV vs input-downscale can be paired at matched tokens (Goal C). FastV r=0.5
+    # lands ~509 tok (≈ input_keep 0.5); FastV r=0.25 lands ~255 tok (≈ input_keep 0.25).
+    {"name": "ds0.5",           "input_keep": 0.5,  "fastv_layer": None, "keep_ratio": 1.0},
+    {"name": "ds0.25",          "input_keep": 0.25, "fastv_layer": None, "keep_ratio": 1.0},
 ]
 
 
